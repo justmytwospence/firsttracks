@@ -1,9 +1,10 @@
 "use server";
 
 import { auth } from "@/auth";
-import { upsertSegmentEffort, upsertSummaryActivity } from "@/lib/db";
+import { enrichActivity, upsertSegmentEffort, upsertSummaryActivity } from "@/lib/db";
 import { baseLogger } from "@/lib/logger";
-import { fetchActivities } from "@/lib/strava";
+import { fetchActivities, fetchActivityStreams } from "@/lib/strava";
+import { isMappableActivity } from "@/types/transformers";
 import pLimit from "p-limit";
 
 type SyncActivitiesMessage = {
@@ -11,7 +12,7 @@ type SyncActivitiesMessage = {
   message: string;
 };
 
-export default async function syncActivities(): Promise<
+export default async function syncActivities(includeStreamData = false): Promise<
   AsyncGenerator<SyncActivitiesMessage>
 > {
   async function* generator(): AsyncGenerator<SyncActivitiesMessage> {
@@ -56,6 +57,22 @@ export default async function syncActivities(): Promise<
             limit(async () => {
                 await upsertSummaryActivity(session.user.id, activity);
                 syncedCount++;
+                
+                // If includeStreamData is true and activity is mappable, fetch and enrich with stream data
+                if (includeStreamData && isMappableActivity(activity)) {
+                  try {
+                    const { activityStreams } = await fetchActivityStreams(
+                      session.access_token, 
+                      activity.id.toString()
+                    );
+                    if (activityStreams) {
+                      await enrichActivity(activity.id.toString(), activityStreams);
+                    }
+                  } catch (error) {
+                    baseLogger.warn(`Failed to fetch streams for activity ${activity.id}:`, error);
+                    // Continue without failing the entire sync
+                  }
+                }
             })
           )
         );

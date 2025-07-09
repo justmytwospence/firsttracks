@@ -14,8 +14,8 @@ export default function SyncActivitiesButton() {
     try {
       setIsSyncing(true);
       toast.dismiss();
-      const syncToastId = toast.message("Syncing activities...");
-      const generator = await syncActivities();
+      const syncToastId = toast.message("Syncing activities with stream data...");
+      const generator = await syncActivities(true); // Include stream data
       for await (const result of generator) {
         switch (result.type) {
           case "error":

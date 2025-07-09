@@ -44,7 +44,8 @@ export async function fetchActivity(
 }
 
 export async function fetchActivityWithStreams(
-  activityId: string
+  activityId: string,
+  forceRefreshStreams = false
 ): Promise<{ activity: EnrichedActivity; streams?: StreamSet }> {
   const session = await auth();
   if (!session?.user?.id) {
@@ -77,16 +78,18 @@ export async function fetchActivityWithStreams(
     streams = activityStreams;
   } else {
     enrichedActivity = activity;
-    // Always fetch streams for display even if activity is already enriched
-    try {
-      const { activityStreams } = await fetchActivityStreams(
-        session.access_token,
-        activityId
-      );
-      streams = activityStreams;
-    } catch (error) {
-      baseLogger.warn(`Failed to fetch streams for activity ${activityId}:`, error);
-      // Continue without streams if fetch fails
+    // Only fetch streams if forced or if we need them for display
+    if (forceRefreshStreams) {
+      try {
+        const { activityStreams } = await fetchActivityStreams(
+          session.access_token,
+          activityId
+        );
+        streams = activityStreams;
+      } catch (error) {
+        baseLogger.warn(`Failed to fetch streams for activity ${activityId}:`, error);
+        // Continue without streams if fetch fails
+      }
     }
   }
 
