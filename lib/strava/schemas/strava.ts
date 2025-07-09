@@ -312,9 +312,33 @@ export const LatLngStreamSchema = z.object({
   series_type: z.string()
 })
 
+export const HeartrateStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(), // Original size of the stream
+  resolution: z.string(), // Resolution of the stream
+  series_type: z.string()
+})
+
+export const VelocityStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data  
+  original_size: z.number().int(), // Original size of the stream
+  resolution: z.string(), // Resolution of the stream
+  series_type: z.string()
+})
+
+export const TimeStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(), // Original size of the stream
+  resolution: z.string(), // Resolution of the stream
+  series_type: z.string()
+})
+
 export const StreamSetSchema = z.object({
   distance: DistanceStreamSchema.optional(),
   latlng: LatLngStreamSchema.optional(),
   altitude: AltitudeStreamSchema.optional(),
+  heartrate: HeartrateStreamSchema.optional(),
+  velocity_smooth: VelocityStreamSchema.optional(),
+  time: TimeStreamSchema.optional(),
 })
 export type StreamSet = z.infer<typeof StreamSetSchema>;

@@ -1,10 +1,9 @@
-import { fetchActivity } from "@/app/actions/fetchActivity";
+import { fetchActivityWithStreams } from "@/app/actions/fetchActivity";
 import { auth } from "@/auth";
-import { toCourse } from "@/types/transformers";
 import { notFound } from "next/navigation";
-import CourseDetail from "../../course-detail";
+import ActivityDetail from "@/components/activity-detail";
 
-export default async function RoutePage({ params }) {
+export default async function ActivityPage({ params }) {
 	const session = await auth();
 	if (!session) {
 		return null;
@@ -12,13 +11,11 @@ export default async function RoutePage({ params }) {
 
 	const { activityId } = await params;
 
-	const enrichedActivity = await fetchActivity(activityId);
+	const { activity, streams } = await fetchActivityWithStreams(activityId);
 
-	if (!enrichedActivity) {
+	if (!activity) {
 		notFound();
 	}
 
-	const enrichedCourse = toCourse(enrichedActivity);
-
-	return <CourseDetail course={enrichedCourse} />;
+	return <ActivityDetail activity={activity} activityStreams={streams} />;
 }
