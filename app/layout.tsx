@@ -18,8 +18,8 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Strava Tools",
-  description: "The things you wished Strava could do",
+  title: "Vertfarm",
+  description: "Tools for people who like to farm vert",
 };
 
 export default async function RootLayout({
