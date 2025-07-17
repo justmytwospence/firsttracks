@@ -1,8 +1,8 @@
 import type { Bounds } from "@/app/actions/findPath";
-import { longPrisma, prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 
 export async function insertGeoTiff(geoTiff: Buffer) {
-  await longPrisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx) => {
     // Set memory and timeout settings individually
     await tx.$executeRaw`SET LOCAL work_mem = '256MB'`;
     await tx.$executeRaw`SET LOCAL maintenance_work_mem = '1GB'`;
