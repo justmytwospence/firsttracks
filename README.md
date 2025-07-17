@@ -1,6 +1,6 @@
-# Strava Tools
+# Vertfarm
 
-Advanced route analysis and comparison tools for Strava users. Work in Progress.
+Advanced route analysis and comparison tools for Strava users who like to farm vert. Work in Progress.
 
 ## Tech Stack
 
