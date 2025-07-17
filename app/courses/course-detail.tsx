@@ -4,7 +4,7 @@ import ElevationChart from "@/components/elevation-chart";
 import GradientCdfChart from "@/components/gradient-cdf-chart";
 import GeoJSONLayer from "@/components/leaflet-geojson-layer";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
-import { ViewOnStravaLink } from "@/components/strava/strava-attribution";
+import { ViewOnStravaLink } from "@/components/strava-attribution";
 import {
   Breadcrumb,
   BreadcrumbItem,

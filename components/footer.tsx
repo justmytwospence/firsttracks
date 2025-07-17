@@ -1,4 +1,4 @@
-import { StravaAttribution } from "@/components/strava/strava-attribution";
+import { StravaAttribution } from "@/components/strava-attribution";
 
 export default function Footer() {
   return (
