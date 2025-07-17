@@ -1,3 +1,4 @@
+import Footer from "@/components/footer";
 import Topbar from "@/components/topbar";
 import type { Metadata } from "next";
 import localFont from "next/font/local";
@@ -33,8 +34,11 @@ export default async function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased relative`}
       >
         <ReactProviders session={session}>
-          <Topbar />
-          <main className="w-full max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8">{children}</main>
+          <div className="min-h-screen flex flex-col">
+            <Topbar />
+            <main className="flex-1 w-full max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8">{children}</main>
+            <Footer />
+          </div>
         </ReactProviders>
       </body>
     </html>
