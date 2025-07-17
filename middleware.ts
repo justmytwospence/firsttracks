@@ -30,6 +30,7 @@ export const config = {
      * 3. /_next (Next.js internals)
      * 4. /static (static files)
      * 5. /favicon.ico, etc. (static files)
+     * 6. /strava-logos/* (Strava brand assets)
      */
-    "/((?!api/|login|logout|pathfinder|_next|static|favicon.ico).*)",
+    "/((?!api/|login|logout|pathfinder|_next|static|favicon.ico|strava-logos/).*)",
 };

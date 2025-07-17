@@ -4,6 +4,7 @@ import ElevationChart from "@/components/elevation-chart";
 import GradientCdfChart from "@/components/gradient-cdf-chart";
 import GeoJSONLayer from "@/components/leaflet-geojson-layer";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
+import { ViewOnStravaLink } from "@/components/strava/strava-attribution";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -40,7 +41,13 @@ export default function CourseDetail({ course }: { course: EnrichedCourse }) {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <h1 className="text-3xl font-bold">{course.name}</h1>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <h1 className="text-3xl font-bold">{course.name}</h1>
+        <ViewOnStravaLink 
+          routeId={Number.parseInt(course.id)} 
+          className="text-sm self-start sm:self-center"
+        />
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card className="w-full aspect-[2/1] lg:aspect-square">
