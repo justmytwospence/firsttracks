@@ -1,4 +1,4 @@
-# Strava Tools - AI Agent Instructions
+# Vertfarm - AI Agent Instructions
 
 ## Core Architecture
 

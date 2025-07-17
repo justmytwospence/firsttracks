@@ -35,8 +35,8 @@ export function StravaAttribution({
 }
 
 interface ViewOnStravaLinkProps {
-  activityId?: number;
-  routeId?: number;
+  activityId?: string | number;
+  routeId?: string | number;
   className?: string;
   children?: React.ReactNode;
 }

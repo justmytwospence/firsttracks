@@ -5,10 +5,7 @@ import { AspectChart } from "@/components/aspect-chart";
 import ElevationProfile from "@/components/elevation-chart";
 import FindPathButton from "@/components/find-path-button";
 import GradientCDF from "@/components/gradient-cdf-chart";
-import GeoJSONLayer from "@/components/leaflet-geojson-layer"; // Import GeoJSONLayer
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
-import LeafletPathfindingLayer from "@/components/leaflet-pathfinding-layer";
-import LeafletRasterLayer from "@/components/leaflet-raster-layer"; // Import LeafletRasterLayer
 import LocationSearch from "@/components/location-search";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -32,10 +29,16 @@ import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
 import { ChevronDown, Download } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useCallback, useState } from "react";
 import togpx from "togpx";
 
 const parseGeoraster = require("georaster");
+
+// Dynamic imports for Leaflet components to avoid SSR issues
+const GeoJSONLayer = dynamic(() => import("@/components/leaflet-geojson-layer"), { ssr: false });
+const LeafletPathfindingLayer = dynamic(() => import("@/components/leaflet-pathfinding-layer"), { ssr: false });
+const LeafletRasterLayer = dynamic(() => import("@/components/leaflet-raster-layer"), { ssr: false });
 
 export default function PathFinderPage() {
   const [waypoints, setWaypoints] = useState<Point[]>([]);

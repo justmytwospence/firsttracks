@@ -2,7 +2,6 @@
 
 import ElevationChart from "@/components/elevation-chart";
 import GradientCdfChart from "@/components/gradient-cdf-chart";
-import GeoJSONLayer from "@/components/leaflet-geojson-layer";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import { ViewOnStravaLink } from "@/components/strava-attribution";
 import {
@@ -15,6 +14,10 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
 import type { EnrichedCourse } from "@prisma/client";
+import dynamic from "next/dynamic";
+
+// Dynamic import for Leaflet component to avoid SSR issues
+const GeoJSONLayer = dynamic(() => import("@/components/leaflet-geojson-layer"), { ssr: false });
 
 export default function CourseDetail({ course }: { course: EnrichedCourse }) {
   return (
@@ -44,7 +47,10 @@ export default function CourseDetail({ course }: { course: EnrichedCourse }) {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <h1 className="text-3xl font-bold">{course.name}</h1>
         <ViewOnStravaLink 
-          routeId={Number.parseInt(course.id)} 
+          {...(course.courseType === "route" 
+            ? { routeId: course.id }
+            : { activityId: course.id }
+          )}
           className="text-sm self-start sm:self-center"
         />
       </div>

@@ -12,8 +12,11 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { createHoverIndexStore } from "@/store";
 import type { Mappable, MappableItem } from "@prisma/client";
+import dynamic from "next/dynamic";
 import { useMemo, useState } from "react";
-import GeoJSONLayer from "./leaflet-geojson-layer";
+
+// Dynamic import for Leaflet component to avoid SSR issues
+const GeoJSONLayer = dynamic(() => import("./leaflet-geojson-layer"), { ssr: false });
 
 type SelectedTab = "routes" | "activities";
 

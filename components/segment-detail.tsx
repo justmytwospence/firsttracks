@@ -12,7 +12,10 @@ import {
 } from "@/components/ui/breadcrumb";
 import { Card, CardContent } from "@/components/ui/card";
 import type { EnrichedSegment } from "@prisma/client";
-import GeoJSONLayer from "./leaflet-geojson-layer";
+import dynamic from "next/dynamic";
+
+// Dynamic import for Leaflet component to avoid SSR issues
+const GeoJSONLayer = dynamic(() => import("./leaflet-geojson-layer"), { ssr: false });
 
 export default function SegmentDetail({
   segment,

@@ -1,10 +1,13 @@
-import GeoJSONLayer from "@/components/leaflet-geojson-layer"; 
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import { Card } from "@/components/ui/card";
 import type { Course } from "@prisma/client";
 import cn from "clsx";
 import { Clock, Navigation, TrendingUp } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
+
+// Dynamic import for Leaflet component to avoid SSR issues
+const GeoJSONLayer = dynamic(() => import("@/components/leaflet-geojson-layer"), { ssr: false });
 
 type CourseCardProps = {
   course: Course;
