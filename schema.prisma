@@ -37,6 +37,7 @@ model User {
   segments       Segment[]
   sessions       Session[]
   segmentEfforts SegmentEffort[]
+  activityStreams ActivityStream[]
 }
 
 model Account {
@@ -231,6 +232,33 @@ model Activity {
   // Relations
   user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   SegmentEffort SegmentEffort[]
+  ActivityStream ActivityStream[]
 
   @@unique([id, userId])
+}
+
+model ActivityStream {
+  id                 String   @id @default(cuid())
+  activityId         String   @map("activity_id")
+  userId             String   @map("user_id")
+  time               DateTime
+  altitude           Float?
+  cadence            Int?
+  distance           Float?
+  gradientSmooth     Float?   @map("gradient_smooth")
+  heartrate          Int?
+  latitude           Float?
+  longitude          Float?
+  moving             Boolean?
+  temperature        Float?
+  velocitySmooth     Float?   @map("velocity_smooth")
+  watts              Int?
+  
+  // Relations
+  activity Activity @relation(fields: [activityId, userId], references: [id, userId], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([activityId, userId, time])
+  @@index([time])
+  @@map("activity_streams")
 }

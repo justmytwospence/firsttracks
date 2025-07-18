@@ -75,3 +75,7 @@ function toCourse(
   };
 }
 export { toCourse };
+
+export function toActivity(activity: MappableActivity): Activity {
+  return activity;
+}

@@ -25,6 +25,7 @@ export default function Topbar() {
   const links = [
     { href: "/pathfinder", label: "Path Finder" },
     { href: "/courses", label: "Courses" },
+    { href: "/activities", label: "Activities" },
     { href: "/course-comparison", label: "Compare Courses" },
     { href: "/segments", label: "Segments" },
   ];
