@@ -20,7 +20,8 @@ export interface ActivityStreamData {
 export async function storeActivityStreams(
   userId: string,
   activityId: string,
-  streams: StreamSet
+  streams: StreamSet,
+  activityStartTime: Date
 ): Promise<void> {
   baseLogger.debug(`Storing activity streams for activity ${activityId}`);
 
@@ -35,7 +36,7 @@ export async function storeActivityStreams(
   const streamDataPoints: ActivityStreamData[] = timeStream.map((timeValue, index) => {
     const latlng = streams.latlng?.data?.[index];
     return {
-      time: new Date(Date.now() + timeValue * 1000), // Convert relative time to absolute time
+      time: new Date(activityStartTime.getTime() + timeValue * 1000), // Convert relative time to absolute time
       altitude: streams.altitude?.data?.[index],
       cadence: streams.cadence?.data?.[index],
       distance: streams.distance?.data?.[index],

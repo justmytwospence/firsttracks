@@ -312,9 +312,73 @@ export const LatLngStreamSchema = z.object({
   series_type: z.string()
 })
 
+export const TimeStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data in seconds
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const CadenceStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const GradeSmoothStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const HeartrateStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const MovingStreamSchema = z.object({
+  data: z.array(z.boolean()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const TempStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const VelocitySmoothStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
+export const WattsStreamSchema = z.object({
+  data: z.array(z.number()), // Stream data
+  original_size: z.number().int(),
+  resolution: z.string(),
+  series_type: z.string()
+})
+
 export const StreamSetSchema = z.object({
   distance: DistanceStreamSchema.optional(),
   latlng: LatLngStreamSchema.optional(),
   altitude: AltitudeStreamSchema.optional(),
+  time: TimeStreamSchema.optional(),
+  cadence: CadenceStreamSchema.optional(),
+  grade_smooth: GradeSmoothStreamSchema.optional(),
+  heartrate: HeartrateStreamSchema.optional(),
+  moving: MovingStreamSchema.optional(),
+  temp: TempStreamSchema.optional(),
+  velocity_smooth: VelocitySmoothStreamSchema.optional(),
+  watts: WattsStreamSchema.optional(),
 })
 export type StreamSet = z.infer<typeof StreamSetSchema>;

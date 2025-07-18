@@ -83,7 +83,8 @@ export default async function syncActivitiesWithStreams(): Promise<
                   await storeActivityStreams(
                     session.user.id,
                     activity.id.toString(),
-                    activityStreams
+                    activityStreams,
+                    new Date(activity.start_date)
                   );
                   streamsCount++;
                 }
