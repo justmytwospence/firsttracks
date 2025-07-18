@@ -8,7 +8,7 @@ import SortDropdown, {
 } from "@/components/course-sort-dropdown";
 import TypeDropdown from "@/components/course-type-dropdown";
 import Pagination from "@/components/pagination";
-import SyncActivitiesButton from "@/components/sync-activities-button";
+import ConditionalSyncButton from "@/components/conditional-sync-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { baseLogger } from "@/lib/logger";
@@ -136,7 +136,10 @@ export default function ActivitiesPage() {
           </Button>
         </div>
 
-        <SyncActivitiesButton />
+        <ConditionalSyncButton 
+          selectedIds={selectedIds}
+          selectionMode={selectionMode}
+        />
       </div>
       {isLoading ? (
         <div className="flex justify-center items-center h-screen">

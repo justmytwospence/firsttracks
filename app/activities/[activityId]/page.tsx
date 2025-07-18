@@ -5,6 +5,7 @@ import { fetchActivityStreamsData } from "@/app/actions/fetchActivityStreamsData
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import { Spinner } from "@/components/ui/spinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import ElevationChart from "@/components/elevation-chart";
 import PaceChart from "@/components/pace-chart";
 import HeartRateChart from "@/components/heart-rate-chart";
 import { useQuery } from "@tanstack/react-query";
@@ -193,6 +194,21 @@ export default function ActivityDetailPage({ params }: ActivityDetailPageProps) 
         </Card>
 
         {/* Charts Section */}
+        {/* Elevation Chart - Show if activity has GPS data */}
+        {(activity.polyline || activity.summaryPolyline) && (
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle>Elevation Profile</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="h-64">
+                <ElevationChart polyline={(activity.polyline || activity.summaryPolyline) as any} />
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Stream-based Charts - Show if streams are available */}
         {streams && streams.length > 0 && (
           <>
             <Card className="lg:col-span-2">
