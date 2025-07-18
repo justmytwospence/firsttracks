@@ -1,9 +1,12 @@
 "use client";
 
 import { fetchActivity } from "@/app/actions/fetchActivity";
+import { fetchActivityStreamsData } from "@/app/actions/fetchActivityStreamsData";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import { Spinner } from "@/components/ui/spinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import PaceChart from "@/components/pace-chart";
+import HeartRateChart from "@/components/heart-rate-chart";
 import { useQuery } from "@tanstack/react-query";
 import { Clock, Navigation, TrendingUp, Calendar, MapPin, Zap } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -45,6 +48,15 @@ export default function ActivityDetailPage({ params }: ActivityDetailPageProps) 
     queryFn: () => fetchActivity(params.activityId),
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
+  });
+
+  // Fetch activity streams for charts
+  const { data: streams, isLoading: streamsLoading } = useQuery({
+    queryKey: ["activity-streams", params.activityId],
+    queryFn: () => fetchActivityStreamsData(params.activityId),
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+    enabled: !!activity, // Only fetch streams after activity is loaded
   });
 
   if (isLoading) {
@@ -179,6 +191,41 @@ export default function ActivityDetailPage({ params }: ActivityDetailPageProps) 
             )}
           </CardContent>
         </Card>
+
+        {/* Charts Section */}
+        {streams && streams.length > 0 && (
+          <>
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>Pace Analysis</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {streamsLoading ? (
+                  <div className="flex justify-center items-center h-64">
+                    <Spinner className="h-8 w-8" />
+                  </div>
+                ) : (
+                  <PaceChart streams={streams} />
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle>Heart Rate Analysis</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {streamsLoading ? (
+                  <div className="flex justify-center items-center h-64">
+                    <Spinner className="h-8 w-8" />
+                  </div>
+                ) : (
+                  <HeartRateChart streams={streams} />
+                )}
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </div>
   );

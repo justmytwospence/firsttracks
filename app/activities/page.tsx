@@ -1,14 +1,14 @@
 "use client";
 
 import fetchActivities from "@/app/actions/fetchActivities";
-import ActivityGrid from "@/components/activity-grid";
+import ActivityTable from "@/components/activity-table";
 import SortDropdown, {
   type SortDirection,
   type SortOption,
 } from "@/components/course-sort-dropdown";
 import TypeDropdown from "@/components/course-type-dropdown";
 import Pagination from "@/components/pagination";
-import SyncActivitiesWithStreamsButton from "@/components/sync-activities-with-streams-button";
+import SyncActivitiesButton from "@/components/sync-activities-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { baseLogger } from "@/lib/logger";
@@ -136,7 +136,7 @@ export default function ActivitiesPage() {
           </Button>
         </div>
 
-        <SyncActivitiesWithStreamsButton />
+        <SyncActivitiesButton />
       </div>
       {isLoading ? (
         <div className="flex justify-center items-center h-screen">
@@ -168,7 +168,7 @@ export default function ActivitiesPage() {
               />
             </div>
           </div>
-          <ActivityGrid
+          <ActivityTable
             activities={data.activities}
             sortBy={sortBy}
             sortDir={sortDir}

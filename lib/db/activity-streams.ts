@@ -132,3 +132,38 @@ export async function createActivityStreamsHypertable(): Promise<void> {
     // Don't throw here as the application should still work without hypertable
   }
 }
+
+export async function getActivityStreams(
+  userId: string,
+  activityId: string
+): Promise<ActivityStreamData[]> {
+  try {
+    const streams = await prisma.activityStream.findMany({
+      where: {
+        userId,
+        activityId,
+      },
+      orderBy: {
+        time: 'asc',
+      },
+    });
+
+    return streams.map(stream => ({
+      time: stream.time,
+      altitude: stream.altitude ?? undefined,
+      cadence: stream.cadence ?? undefined,
+      distance: stream.distance ?? undefined,
+      gradientSmooth: stream.gradientSmooth ?? undefined,
+      heartrate: stream.heartrate ?? undefined,
+      latitude: stream.latitude ?? undefined,
+      longitude: stream.longitude ?? undefined,
+      moving: stream.moving ?? undefined,
+      temperature: stream.temperature ?? undefined,
+      velocitySmooth: stream.velocitySmooth ?? undefined,
+      watts: stream.watts ?? undefined,
+    }));
+  } catch (error) {
+    baseLogger.error(`Failed to get activity streams for ${activityId}:`, error);
+    return [];
+  }
+}
