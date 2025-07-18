@@ -18,7 +18,7 @@ export default async function syncActivities(): Promise<
     try {
       const session = await auth();
       if (!session?.user?.id) {
-        throw new Error("Unauthorized");
+      throw new Error("Unauthorized");
       }
 
       baseLogger.info("Syncing activities");
