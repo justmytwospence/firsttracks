@@ -1,9 +1,10 @@
 use georaster::geotiff::{GeoTiffReader, RasterValue};
-use napi::bindgen_prelude::Buffer;
-use std::io::Cursor;
+use std::io::{Read, Seek};
+use wasm_bindgen::prelude::*;
 
-pub fn get_raster(geotiff: &mut GeoTiffReader<&mut Cursor<Buffer>>) -> napi::Result<Vec<Vec<f64>>> {
-  let (width, height) = geotiff.image_info().dimensions.unwrap();
+pub fn get_raster<R: Read + Seek + Send>(geotiff: &mut GeoTiffReader<R>) -> Result<Vec<Vec<f64>>, JsValue> {
+  let (width, height) = geotiff.image_info().dimensions
+    .ok_or_else(|| JsValue::from_str("Failed to get image dimensions"))?;
   let width: usize = width as usize;
   let height: usize = height as usize;
 
@@ -11,10 +12,10 @@ pub fn get_raster(geotiff: &mut GeoTiffReader<&mut Cursor<Buffer>>) -> napi::Res
   for pixel in geotiff.pixels(0, 0, width as u32, height as u32) {
     let (x, y, value) = pixel;
     let data: f64 = match value {
-      RasterValue::F64(v) => Ok(v),
-      RasterValue::F32(v) => Ok(v as f64),
-      _ => Err(napi::Error::from_reason(format!("Data must be f64, found: {:?}", value))),
-    }?;
+      RasterValue::F64(v) => v,
+      RasterValue::F32(v) => v as f64,
+      _ => return Err(JsValue::from_str(&format!("Data must be f64, found: {:?}", value))),
+    };
     raster_data[y as usize][x as usize] = data;
   }
   Ok(raster_data)

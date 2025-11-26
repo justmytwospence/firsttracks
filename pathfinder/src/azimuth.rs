@@ -1,19 +1,37 @@
 use georaster::geotiff::GeoTiffReader;
-use napi::bindgen_prelude::Buffer;
-use napi_derive::napi;
+use serde::{Deserialize, Serialize};
 use std::{f64::consts::PI, io::Cursor};
+use wasm_bindgen::prelude::*;
 
 use crate::{get_raster, serialize_to_geotiff};
 
-#[napi]
+#[wasm_bindgen]
 pub struct AzimuthResult {
-  pub elevations: Buffer,
-  pub azimuths: Buffer,
-  pub gradients: Buffer,
+  elevations: Vec<u8>,
+  azimuths: Vec<u8>,
+  gradients: Vec<u8>,
 }
 
-#[derive(PartialEq, Debug)]
-#[napi(string_enum)]
+#[wasm_bindgen]
+impl AzimuthResult {
+  #[wasm_bindgen(getter)]
+  pub fn elevations(&self) -> Vec<u8> {
+    self.elevations.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn azimuths(&self) -> Vec<u8> {
+    self.azimuths.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn gradients(&self) -> Vec<u8> {
+    self.gradients.clone()
+  }
+}
+
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Aspect {
   North,
   Northeast,
@@ -100,12 +118,13 @@ fn compute_gradient_along_azimuth(gx: f64, gy: f64, azimuth: f64) -> f64 {
 }
 
 /// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for each pixel on a `Vec<f32>`
-#[napi]
-pub fn compute_azimuths(elevations_geotiff: Buffer) -> AzimuthResult {
-  let mut cursor: Cursor<Buffer> = Cursor::new(elevations_geotiff);
-  let mut elevations_geotiff: GeoTiffReader<&mut Cursor<Buffer>> =
-    GeoTiffReader::open(&mut cursor).unwrap();
-  let elevations: Vec<Vec<f64>> = get_raster(&mut elevations_geotiff).unwrap();
+#[wasm_bindgen]
+pub fn compute_azimuths(elevations_geotiff: &[u8]) -> Result<AzimuthResult, JsValue> {
+  let mut cursor: Cursor<Vec<u8>> = Cursor::new(elevations_geotiff.to_vec());
+  let mut elevations_geotiff: GeoTiffReader<Cursor<Vec<u8>>> =
+    GeoTiffReader::open(cursor)
+      .map_err(|e| JsValue::from_str(&format!("Failed to open GeoTIFF: {:?}", e)))?;
+  let elevations: Vec<Vec<f64>> = get_raster(&mut elevations_geotiff)?;
 
   let gx_kernel: [[f64; 5]; 5] = [
     [-5.0, -4.0, 0.0, 4.0, 5.0],
@@ -138,8 +157,8 @@ pub fn compute_azimuths(elevations_geotiff: Buffer) -> AzimuthResult {
       // Apply the 5x5 kernel
       for ki in 0..5 {
         for kj in 0..5 {
-          let x: usize = j + kj - 2; // Adjust column index (center kernel on current pixel)
-          let y: usize = i + ki - 2; // Adjust row index
+          let x: usize = j + kj - 2;
+          let y: usize = i + ki - 2;
           let pixel_value: f64 = elevations[y][x];
 
           gx += pixel_value * gx_kernel[ki][kj];
@@ -154,12 +173,15 @@ pub fn compute_azimuths(elevations_geotiff: Buffer) -> AzimuthResult {
     }
   }
 
-  let geo_keys: Vec<u32> = elevations_geotiff.geo_keys.as_ref().unwrap().clone();
-  let origin: [f64; 2] = elevations_geotiff.origin().unwrap();
+  let geo_keys: Vec<u32> = elevations_geotiff.geo_keys.as_ref()
+    .ok_or_else(|| JsValue::from_str("Missing geo_keys"))?
+    .clone();
+  let origin: [f64; 2] = elevations_geotiff.origin()
+    .ok_or_else(|| JsValue::from_str("Missing origin"))?;
 
-  AzimuthResult {
-    elevations: serialize_to_geotiff(elevations, &geo_keys, &origin).unwrap(),
-    azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin).unwrap(),
-    gradients: serialize_to_geotiff(gradients, &geo_keys, &origin).unwrap(),
-  }
+  Ok(AzimuthResult {
+    elevations: serialize_to_geotiff(elevations, &geo_keys, &origin)?,
+    azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin)?,
+    gradients: serialize_to_geotiff(gradients, &geo_keys, &origin)?,
+  })
 }
