@@ -6,8 +6,9 @@
  */
 
 const DB_NAME = 'dem-cache';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'tiles';
+const AZIMUTHS_STORE_NAME = 'azimuths';
 
 export interface Bounds {
   north: number;
@@ -20,6 +21,15 @@ interface CachedTile {
   key: string;
   bounds: Bounds;
   data: ArrayBuffer;
+  timestamp: number;
+}
+
+interface CachedAzimuths {
+  key: string;
+  bounds: Bounds;
+  elevations: ArrayBuffer;
+  azimuths: ArrayBuffer;
+  gradients: ArrayBuffer;
   timestamp: number;
 }
 
@@ -57,13 +67,32 @@ function openDB(): Promise<IDBDatabase> {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // Verify both stores exist, if not we need to delete and recreate
+      if (!db.objectStoreNames.contains(STORE_NAME) || !db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
+        db.close();
+        // Delete and recreate
+        const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
+        deleteRequest.onsuccess = () => {
+          // Recursively call openDB to create fresh database
+          openDB().then(resolve).catch(reject);
+        };
+        deleteRequest.onerror = () => reject(deleteRequest.error);
+        return;
+      }
+      resolve(db);
+    };
     
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'key' });
         store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
+        const azimuthsStore = db.createObjectStore(AZIMUTHS_STORE_NAME, { keyPath: 'key' });
+        azimuthsStore.createIndex('timestamp', 'timestamp', { unique: false });
       }
     };
   });
@@ -136,7 +165,15 @@ async function fetchDEM(bounds: Bounds, dataset = 'USGS10m'): Promise<ArrayBuffe
   const response = await fetch(`/api/dem?${params}`);
   
   if (!response.ok) {
-    throw new Error(`Failed to fetch DEM: ${response.statusText}`);
+    // Try to get error details from response body
+    let errorDetail = response.statusText;
+    try {
+      const errorJson = await response.json();
+      errorDetail = errorJson.error || errorDetail;
+    } catch {
+      // Response wasn't JSON, use statusText
+    }
+    throw new Error(`Failed to fetch DEM: ${errorDetail}`);
   }
   
   return response.arrayBuffer();
@@ -202,6 +239,203 @@ export async function clearDEMCache(): Promise<void> {
 }
 
 /**
+ * Calculate approximate area in km² from lat/lng bounds
+ */
+function calculateAreaKm2(bounds: Bounds): number {
+  const latDiff = bounds.north - bounds.south;
+  const lngDiff = bounds.east - bounds.west;
+  const avgLat = (bounds.north + bounds.south) / 2;
+  // km per degree latitude is ~111
+  const latKm = latDiff * 111;
+  // km per degree longitude varies with latitude
+  const lngKm = lngDiff * 111 * Math.cos(avgLat * Math.PI / 180);
+  return latKm * lngKm;
+}
+
+// Maximum area limits in km² from OpenTopography API docs
+const MAX_AREA_KM2: Record<string, number> = {
+  "USGS1m": 250,
+  "USGS10m": 25000,
+  "USGS30m": 225000,
+};
+
+/**
+ * Expand bounds by a factor, limited by OpenTopo API max area
+ * A factor of 3 means the resulting bounds will be 3x the width and height
+ */
+export function expandBounds(bounds: Bounds, factor: number, dataset = 'USGS10m'): Bounds {
+  const width = bounds.east - bounds.west;
+  const height = bounds.north - bounds.south;
+  const centerLon = (bounds.east + bounds.west) / 2;
+  const centerLat = (bounds.north + bounds.south) / 2;
+  
+  let newWidth = width * factor;
+  let newHeight = height * factor;
+  
+  // Calculate expanded bounds and check area
+  let expandedBounds: Bounds = {
+    north: centerLat + newHeight / 2,
+    south: centerLat - newHeight / 2,
+    east: centerLon + newWidth / 2,
+    west: centerLon - newWidth / 2,
+  };
+  
+  const maxArea = MAX_AREA_KM2[dataset] || 25000;
+  const expandedArea = calculateAreaKm2(expandedBounds);
+  
+  // If too large, reduce expansion factor until it fits
+  if (expandedArea > maxArea) {
+    // Scale down proportionally
+    const scaleFactor = Math.sqrt(maxArea / expandedArea) * 0.95; // 5% safety margin
+    newWidth = width * factor * scaleFactor;
+    newHeight = height * factor * scaleFactor;
+    
+    expandedBounds = {
+      north: centerLat + newHeight / 2,
+      south: centerLat - newHeight / 2,
+      east: centerLon + newWidth / 2,
+      west: centerLon - newWidth / 2,
+    };
+    
+    console.log(`[DEM] Reduced expansion to fit ${dataset} limit of ${maxArea} km²`);
+  }
+  
+  return expandedBounds;
+}
+
+/**
+ * Check if outer bounds fully contain inner bounds
+ */
+export function boundsContain(outer: Bounds, inner: Bounds): boolean {
+  return (
+    outer.north >= inner.north &&
+    outer.south <= inner.south &&
+    outer.east >= inner.east &&
+    outer.west <= inner.west
+  );
+}
+
+/**
+ * Find a cached tile that contains the requested bounds
+ * Returns the cached data if found, null otherwise
+ */
+async function findContainingCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
+  try {
+    const db = await openDB();
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.openCursor();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const tile = cursor.value as CachedTile;
+          if (boundsContain(tile.bounds, bounds)) {
+            console.log('[DEM Cache] Found containing tile:', boundsToKey(tile.bounds));
+            resolve(tile.data);
+            return;
+          }
+          cursor.continue();
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Preload DEM data for expanded bounds in the background
+ * Returns a promise that resolves when the preload is complete
+ * Useful for fetching a larger area ahead of time (e.g., 3x viewport on first waypoint)
+ */
+export async function preloadDEM(
+  bounds: Bounds,
+  options?: {
+    expansionFactor?: number;
+    dataset?: string;
+  }
+): Promise<void> {
+  const { expansionFactor = 3, dataset = 'USGS10m' } = options || {};
+  
+  // Expand and normalize bounds
+  const expandedBounds = expandBounds(bounds, expansionFactor);
+  const normalizedBounds = normalizeBounds(expandedBounds);
+  const cacheKey = boundsToKey(normalizedBounds);
+  
+  // Check if already cached
+  const cached = await getCachedTile(normalizedBounds);
+  if (cached) {
+    console.log('[DEM Preload] Already cached:', cacheKey);
+    return;
+  }
+  
+  console.log('[DEM Preload] Starting background fetch for:', cacheKey);
+  
+  try {
+    const data = await fetchDEM(normalizedBounds, dataset);
+    await cacheTile(normalizedBounds, data);
+    console.log('[DEM Preload] Cached expanded region:', cacheKey);
+  } catch (error) {
+    console.warn('[DEM Preload] Failed:', error);
+    // Preload failures are non-critical, don't throw
+  }
+}
+
+/**
+ * Get DEM data for bounds, checking for containing cached tiles first
+ * This allows preloaded larger regions to serve smaller requests
+ */
+export async function getDEMWithContainsCheck(
+  bounds: Bounds,
+  options?: {
+    dataset?: string;
+    onProgress?: (message: string) => void;
+  }
+): Promise<Uint8Array> {
+  const { dataset = 'USGS10m', onProgress } = options || {};
+  
+  const normalizedBounds = normalizeBounds(bounds);
+  const cacheKey = boundsToKey(normalizedBounds);
+  
+  // First check for exact match
+  onProgress?.('Checking DEM cache...');
+  console.log('[DEM Cache] Looking for key:', cacheKey);
+  const exactCached = await getCachedTile(normalizedBounds);
+  
+  if (exactCached) {
+    console.log('[DEM Cache] Exact cache HIT');
+    onProgress?.('Using cached DEM data');
+    return new Uint8Array(exactCached);
+  }
+  
+  // Check for a larger cached tile that contains our bounds
+  console.log('[DEM Cache] Checking for containing cached tile...');
+  const containingCached = await findContainingCachedTile(normalizedBounds);
+  
+  if (containingCached) {
+    console.log('[DEM Cache] Found containing cached tile');
+    onProgress?.('Using cached DEM data');
+    return new Uint8Array(containingCached);
+  }
+  
+  console.log('[DEM Cache] Cache MISS - fetching from server');
+  onProgress?.('Downloading DEM from OpenTopo...');
+  const data = await fetchDEM(normalizedBounds, dataset);
+  
+  onProgress?.('Caching DEM data...');
+  await cacheTile(normalizedBounds, data);
+  console.log('[DEM Cache] Cached with key:', cacheKey);
+  
+  return new Uint8Array(data);
+}
+
+/**
  * Get approximate cache size (number of tiles)
  */
 export async function getDEMCacheStats(): Promise<{ count: number; oldestTimestamp?: number }> {
@@ -231,4 +465,135 @@ export async function getDEMCacheStats(): Promise<{ count: number; oldestTimesta
   } catch {
     return { count: 0 };
   }
+}
+
+// ============ AZIMUTH CACHING ============
+
+export interface AzimuthData {
+  elevations: Uint8Array;
+  azimuths: Uint8Array;
+  gradients: Uint8Array;
+}
+
+/**
+ * Get cached azimuths for bounds
+ */
+export async function getCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
+  try {
+    const db = await openDB();
+    const normalizedBounds = normalizeBounds(bounds);
+    const key = boundsToKey(normalizedBounds);
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
+      const request = store.get(key);
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const result = request.result as CachedAzimuths | undefined;
+        if (result) {
+          console.log('[Azimuth Cache] Cache HIT for:', key);
+          resolve({
+            elevations: new Uint8Array(result.elevations),
+            azimuths: new Uint8Array(result.azimuths),
+            gradients: new Uint8Array(result.gradients),
+          });
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find cached azimuths that contain the requested bounds
+ */
+export async function findContainingCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
+  try {
+    const db = await openDB();
+    const normalizedBounds = normalizeBounds(bounds);
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
+      const request = store.openCursor();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const cached = cursor.value as CachedAzimuths;
+          if (boundsContain(cached.bounds, normalizedBounds)) {
+            console.log('[Azimuth Cache] Found containing cached azimuths');
+            resolve({
+              elevations: new Uint8Array(cached.elevations),
+              azimuths: new Uint8Array(cached.azimuths),
+              gradients: new Uint8Array(cached.gradients),
+            });
+            return;
+          }
+          cursor.continue();
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cache computed azimuths
+ */
+export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<void> {
+  try {
+    const db = await openDB();
+    const normalizedBounds = normalizeBounds(bounds);
+    const key = boundsToKey(normalizedBounds);
+    
+    const cached: CachedAzimuths = {
+      key,
+      bounds: normalizedBounds,
+      elevations: data.elevations.buffer as ArrayBuffer,
+      azimuths: data.azimuths.buffer as ArrayBuffer,
+      gradients: data.gradients.buffer as ArrayBuffer,
+      timestamp: Date.now(),
+    };
+    
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
+      const request = store.put(cached);
+      
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        console.log('[Azimuth Cache] Cached azimuths for:', key);
+        resolve();
+      };
+    });
+  } catch {
+    // Caching failed, but that's okay
+  }
+}
+
+/**
+ * Get azimuths with cache check (exact match or containing)
+ */
+export async function getAzimuthsWithContainsCheck(bounds: Bounds): Promise<AzimuthData | null> {
+  const normalizedBounds = normalizeBounds(bounds);
+  
+  // First check exact match
+  const exact = await getCachedAzimuths(normalizedBounds);
+  if (exact) return exact;
+  
+  // Check for containing cached azimuths
+  const containing = await findContainingCachedAzimuths(normalizedBounds);
+  if (containing) return containing;
+  
+  return null;
 }

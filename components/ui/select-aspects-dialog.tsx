@@ -10,7 +10,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 // Aspect type matching WASM (lowercase)
 export type Aspect = 
@@ -61,6 +61,11 @@ export function SelectAspectsDialog({
   const [selected, setSelected] = useState<Set<Aspect>>(
     new Set(selectedDirections)
   );
+
+  // Sync internal state when prop changes (e.g., from chart clicks)
+  useEffect(() => {
+    setSelected(new Set(selectedDirections));
+  }, [selectedDirections]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

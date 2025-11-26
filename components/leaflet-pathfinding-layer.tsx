@@ -12,6 +12,7 @@ interface LeafletPathfindingLayerProps {
   onMapClick?: (point: Point) => void;
   onBoundsChange?: (newBounds: Bounds) => Bounds;
   mapCenter?: LatLngExpression;
+  fitBounds?: Bounds;
 }
 
 export default function LeafletPathfindingLayer({
@@ -20,6 +21,7 @@ export default function LeafletPathfindingLayer({
   onMapClick,
   onBoundsChange,
   mapCenter,
+  fitBounds,
 }: LeafletPathfindingLayerProps) {
   const map = useMap();
   const [userLocation, setUserLocation] = useState<[number, number] | null>(
@@ -39,7 +41,8 @@ export default function LeafletPathfindingLayer({
             setUserLocation(location);
           },
           (error) => {
-            baseLogger.error("Error getting location:", error);
+            // User denied permission or geolocation unavailable - not a critical error
+            baseLogger.warn("Geolocation unavailable:", error.message || "Permission denied or not supported");
           }
         );
       }
@@ -47,13 +50,36 @@ export default function LeafletPathfindingLayer({
     }
   );
 
+  const prevMapCenterRef = useRef<LatLngExpression | undefined>(mapCenter);
+  const prevFitBoundsRef = useRef<Bounds | undefined>(fitBounds);
+
   useEffect(() => {
-    if (mapCenter) {
+    // Only set view when mapCenter explicitly changes (e.g., from location search)
+    // Don't set view on initial mount - let the map use its saved/default bounds
+    if (mapCenter && mapCenter !== prevMapCenterRef.current) {
       map.setView(mapCenter, 13, { animate: true });
-    } else if (userLocation) {
-      map.setView(userLocation, 13, { animate: true });
     }
-  }, [map, mapCenter, userLocation]);
+    prevMapCenterRef.current = mapCenter;
+  }, [map, mapCenter]);
+
+  useEffect(() => {
+    // Fit bounds when fitBounds changes (e.g., from GPX import)
+    // Use a delay to allow the dock to appear and resize the map first
+    if (fitBounds && fitBounds !== prevFitBoundsRef.current) {
+      const timer = setTimeout(() => {
+        map.invalidateSize(); // Force map to recalculate its size after dock appears
+        map.fitBounds(
+          [
+            [fitBounds.south, fitBounds.west],
+            [fitBounds.north, fitBounds.east],
+          ],
+          { padding: [20, 20], animate: true }
+        );
+      }, 150); // Delay to allow dock animation to complete
+      prevFitBoundsRef.current = fitBounds;
+      return () => clearTimeout(timer);
+    }
+  }, [map, fitBounds]);
 
   const mapEvents = useMapEvents({
     click(e) {
@@ -80,15 +106,13 @@ export default function LeafletPathfindingLayer({
     },
   });
 
-  // Center the map on the markers when they change
+  // Track previous marker count (kept for potential future use)
+  const prevMarkerCountRef = useRef(markers.length);
+
+  // Update marker count ref without adjusting bounds
   useEffect(() => {
-    if (markers.length > 1) {
-      const markerBounds = L.latLngBounds(
-        markers.map((marker) => [marker.coordinates[1], marker.coordinates[0]])
-      );
-      map.fitBounds(markerBounds, { padding: [100, 100] });
-    }
-  }, [markers, map]);
+    prevMarkerCountRef.current = markers.length;
+  }, [markers.length]);
 
   // Add initialization effect for onMapMove
   useEffect(() => {
@@ -111,8 +135,8 @@ export default function LeafletPathfindingLayer({
         <CircleMarker
           key={`${position.coordinates[0]}-${position.coordinates[1]}`}
           center={[position.coordinates[1], position.coordinates[0]]}
-          radius={8}
-          pathOptions={{ color: "blue", fillColor: "blue", fillOpacity: 0.7 }}
+          radius={5}
+          pathOptions={{ color: "blue", fillColor: "blue", fillOpacity: 1 }}
         />
       ))}
       {showLine && (

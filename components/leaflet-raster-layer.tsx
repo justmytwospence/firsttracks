@@ -5,10 +5,8 @@ import { useEffect, useRef } from "react";
 import { useMap } from "react-leaflet";
 
 function containsAzimuth(aspect: Aspect, azimuth: number, tolerance = 0.0) {
-  console.log(`Checking if ${aspect} contains ${azimuth}`);
   switch (aspect) {
     case "northeast":
-      console.log(22.5 - tolerance <= azimuth && azimuth <= 67.5 + tolerance);
       return 22.5 - tolerance <= azimuth && azimuth <= 67.5 + tolerance;
     case "east":
       return 67.5 - tolerance <= azimuth && azimuth <= 112.5 + tolerance;
@@ -49,10 +47,10 @@ export default function LeafletRasterLayer({
   useEffect(() => {
     geoRasterLayerRef.current = new GeoRasterLayer({
       georaster: aspectRaster,
+      updateWhenZooming: false,
       pixelValuesToColorFn: (values) => {
         const azimuth = values[0];
         const gradient = Math.abs(values[1]);
-        console.log(`Azimuth: ${azimuth}, Gradient: ${gradient}`);
         for (const excludedAspect of excludedAspects) {
           if (containsAzimuth(excludedAspect, azimuth, 2.5)) {
             return `rgba(255, 0, 0, ${Math.min(gradient * 0.4, 0.8)})`;

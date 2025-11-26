@@ -119,6 +119,7 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     // Create exploration callback that posts updates to main thread
     // Note: WASM calls this synchronously, so we post the message but delay happens client-side
     const explorationCallback = (nodes: [number, number][]) => {
+      console.log('[Worker] Exploration callback called with', nodes.length, 'nodes');
       self.postMessage({
         type: 'exploration',
         id,

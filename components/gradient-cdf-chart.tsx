@@ -53,7 +53,13 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       }
     };
 
-    const resizeObserver = new ResizeObserver(resizeChart);
+    // Initial resize after mount to ensure correct sizing
+    requestAnimationFrame(resizeChart);
+
+    const resizeObserver = new ResizeObserver(() => {
+      // Use requestAnimationFrame to batch resize calls
+      requestAnimationFrame(resizeChart);
+    });
     resizeObserver.observe(container);
 
     // Handle transition end with a small delay to ensure layout has settled

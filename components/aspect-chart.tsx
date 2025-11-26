@@ -10,10 +10,11 @@ ChartJS.register(RadialLinearScale, ArcElement, Tooltip, Legend);
 
 export interface AspectChartProps {
   aspectPoints: FeatureCollection;
-
+  excludedAspects?: Aspect[];
+  onAspectClick?: (aspect: Aspect) => void;
 }
 
-export function AspectChart({ aspectPoints }: AspectChartProps) {
+export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: AspectChartProps) {
   const { setHoveredAspect } = aspectStore();
   const [isAspectLocked, setIsAspectLocked] = useState(false);
   const aspects = aspectPoints.features.map(feature => feature.properties?.aspect);
@@ -99,9 +100,12 @@ export function AspectChart({ aspectPoints }: AspectChartProps) {
         return;
       }
       
+      // Set cursor to pointer when hovering over chart elements
+      chart.canvas.style.cursor = elements.length ? 'pointer' : 'default';
+      
       if (isAspectLocked) return;
       
-      if (elements && elements[0]) {
+      if (elements?.[0]) {
         const index = elements[0].index;
         const direction = chartData.labels[index];
         const aspectMap: Record<string, string> = {
@@ -120,11 +124,11 @@ export function AspectChart({ aspectPoints }: AspectChartProps) {
         setHoveredAspect(null);
       }
     },
-    onClick: (event: any, elements: any[]) => {
-      if (elements && elements[0]) {
+    onClick: (_event: ChartEvent, elements: ActiveElement[]) => {
+      if (elements?.[0]) {
         const index = elements[0].index;
         const direction = chartData.labels[index];
-        const aspectMap: Record<string, string> = {
+        const aspectMap: Record<string, Aspect> = {
           'N': 'North',
           'NE': 'Northeast',
           'E': 'East',
@@ -134,8 +138,16 @@ export function AspectChart({ aspectPoints }: AspectChartProps) {
           'W': 'West',
           'NW': 'Northwest'
         };
-        const hoveredAspect = aspectMap[direction] as Aspect;
-        setHoveredAspect(hoveredAspect);
+        const clickedAspectDisplay = aspectMap[direction];
+        // Convert to lowercase for the excluded aspects list (matches WASM type)
+        const clickedAspectLower = clickedAspectDisplay.toLowerCase() as Aspect;
+        
+        // Toggle the aspect in excluded list
+        if (onAspectClick) {
+          onAspectClick(clickedAspectLower);
+        }
+        
+        setHoveredAspect(clickedAspectDisplay);
         setIsAspectLocked(true);
       }
     }

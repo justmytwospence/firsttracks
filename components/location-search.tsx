@@ -108,13 +108,13 @@ export default function LocationSearch({
     <div className="w-full relative">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <div className="w-full flex items-center gap-2 px-3 py-2 border rounded-md bg-background text-sm">
+          <div className="w-full flex items-center gap-2 px-3 py-2 border rounded-md bg-background text-sm cursor-text">
             <Search className="h-4 w-4 text-muted-foreground shrink-0" />
             <input
               placeholder="Search locations..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full bg-transparent border-none outline-none min-w-0"
+              className="w-full bg-transparent border-none outline-none min-w-0 cursor-text"
             />
           </div>
         </PopoverTrigger>
@@ -140,7 +140,7 @@ export default function LocationSearch({
                       setSearch("");
                       setHighlightedIndex(-1);
                     }}
-                    className={index === highlightedIndex ? "bg-muted" : ""}
+                    className={`cursor-pointer ${index === highlightedIndex ? "bg-muted" : ""}`}
                     onMouseEnter={() => setHighlightedIndex(index)}
                   >
                     {result.display_name}

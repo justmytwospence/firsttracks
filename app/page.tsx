@@ -10,12 +10,12 @@ import { Button } from "@/components/ui/button";
 import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
-import type { Bounds } from "@/lib/dem-cache";
+import { type Bounds, preloadDEM } from "@/lib/dem-cache";
 import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
 import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
-import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Mountain, RotateCcw, Route, TrendingUp } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Mountain, RotateCcw, Route, TrendingUp, Undo2, Upload } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -34,6 +34,7 @@ export default function PathFinderPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [excludedAspects, setExcludedAspects] = useState<Aspect[]>([]);
   const [mapCenter, setMapCenter] = useState<[number, number] | undefined>();
+  const [mapFitBounds, setMapFitBounds] = useState<Bounds | undefined>();
   const [pathAspects, setPathAspects] = useState<FeatureCollection | null>(null);
   const [aspectRaster, setAspectRaster] = useState<GeoRaster | null>(null);
   const [maxGradient, setMaxGradient] = useState<number>(0.25);
@@ -42,9 +43,14 @@ export default function PathFinderPage() {
   const [chartsDockOpen, setChartsDockOpen] = useState(true);
   const [selectedChart, setSelectedChart] = useState<"elevation" | "gradient">("elevation");
   const [explorationNodes, setExplorationNodes] = useState<ExplorationNode[]>([]);
+  const [cachedBounds, setCachedBounds] = useState<Bounds | null>(null);
+  const explorationStartTimeRef = useRef<number>(0);
+  const explorationCountRef = useRef<number>(0);
 
   // Reference to FindPathButton's click handler for keyboard shortcut
   const findPathRef = useRef<HTMLButtonElement>(null);
+  const lastAutoPathfindingCount = useRef<number>(0);
+  const gpxInputRef = useRef<HTMLInputElement>(null);
 
   // Detect portrait vs landscape orientation
   useEffect(() => {
@@ -57,22 +63,158 @@ export default function PathFinderPage() {
     return () => window.removeEventListener("resize", checkOrientation);
   }, []);
 
-  // Keyboard shortcut: Cmd+Enter to find path
+  // Undo the last waypoint placement
+  const handleUndo = useCallback(() => {
+    if (waypoints.length === 0) return;
+    
+    const newWaypoints = waypoints.slice(0, -1);
+    setWaypoints(newWaypoints);
+    setExplorationNodes([]);
+    
+    // If we're going from 2+ waypoints down to 1 or 0, we need to trim the path
+    if (waypoints.length >= 2 && path) {
+      if (newWaypoints.length <= 1) {
+        // No path possible with 0 or 1 waypoint
+        setPath(null);
+        setPathAspects(null);
+      } else {
+        // Find where the second-to-last waypoint is in the path and trim there
+        const targetWaypoint = waypoints[waypoints.length - 2]; // The waypoint we want to end at
+        const [targetLon, targetLat] = targetWaypoint.coordinates as [number, number];
+        
+        // Find the index in path.coordinates that matches this waypoint
+        // Search from the end since the waypoint should be near the end
+        let trimIndex = -1;
+        for (let i = path.coordinates.length - 1; i >= 0; i--) {
+          const [lon, lat] = path.coordinates[i] as [number, number];
+          // Check if this coordinate matches the waypoint (within small tolerance)
+          if (Math.abs(lon - targetLon) < 0.0001 && Math.abs(lat - targetLat) < 0.0001) {
+            trimIndex = i;
+            break;
+          }
+        }
+        
+        if (trimIndex > 0) {
+          // Trim the path to end at the second-to-last waypoint
+          setPath({
+            type: "LineString",
+            coordinates: path.coordinates.slice(0, trimIndex + 1),
+          });
+          // Trim pathAspects to match
+          if (pathAspects) {
+            setPathAspects({
+              type: "FeatureCollection",
+              features: pathAspects.features.slice(0, trimIndex + 1),
+            });
+          }
+        } else {
+          // Couldn't find the waypoint in path, clear everything to be safe
+          setPath(null);
+          setPathAspects(null);
+        }
+      }
+    }
+    
+    // Reset the auto-pathfinding counter so it doesn't immediately re-trigger
+    lastAutoPathfindingCount.current = newWaypoints.length;
+  }, [waypoints, path, pathAspects]);
+
+  // Keyboard shortcut: Cmd+Enter to find path, Cmd+Z to undo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         findPathRef.current?.click();
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+        e.preventDefault();
+        handleUndo();
+      }
     };
     
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [handleUndo]);
+
+  // Auto-start pathfinding when second or subsequent waypoint is placed
+  useEffect(() => {
+    if (waypoints.length >= 2 && !isLoading && cachedBounds && waypoints.length !== lastAutoPathfindingCount.current) {
+      lastAutoPathfindingCount.current = waypoints.length;
+      // Small delay to let the UI update first
+      const timer = setTimeout(() => {
+        findPathRef.current?.click();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [waypoints.length, isLoading, cachedBounds]);
+
+  // Compute pathAspects from aspectRaster for imported paths (when pathAspects isn't already set)
+  useEffect(() => {
+    if (path && aspectRaster && !pathAspects) {
+      // Helper to convert azimuth value (0-360) to aspect string
+      // Must match the capitalized format expected by AspectChart
+      const azimuthToAspect = (azimuth: number): string => {
+        if (azimuth === -1 || azimuth === 255) return "Flat"; // NoData values
+        if (azimuth < 22.5) return "North";
+        if (azimuth < 67.5) return "Northeast";
+        if (azimuth < 112.5) return "East";
+        if (azimuth < 157.5) return "Southeast";
+        if (azimuth < 202.5) return "South";
+        if (azimuth < 247.5) return "Southwest";
+        if (azimuth < 292.5) return "West";
+        if (azimuth < 337.5) return "Northwest";
+        return "North";
+      };
+
+      // Look up aspect for each coordinate from the raster
+      const { xmin, ymax, pixelWidth, pixelHeight, values } = aspectRaster;
+      const azimuthValues = values[0]; // First band is azimuths
+      
+      const features = path.coordinates.map((coord) => {
+        const [lon, lat] = coord;
+        
+        // Convert geographic coordinates to pixel coordinates
+        const col = Math.floor((lon - xmin) / pixelWidth);
+        const row = Math.floor((ymax - lat) / Math.abs(pixelHeight));
+        
+        // Get azimuth value from raster (with bounds checking)
+        let aspect = "Flat";
+        if (row >= 0 && row < azimuthValues.length && col >= 0 && col < azimuthValues[0].length) {
+          const azimuthValue = azimuthValues[row][col];
+          aspect = azimuthToAspect(azimuthValue);
+        }
+        
+        return {
+          type: "Feature" as const,
+          properties: { aspect },
+          geometry: {
+            type: "Point" as const,
+            coordinates: coord,
+          },
+        };
+      });
+
+      setPathAspects({
+        type: "FeatureCollection",
+        features,
+      });
+    }
+  }, [path, aspectRaster, pathAspects]);
 
   function handleMapClick(point: Point) {
-    if (path !== null) {
-      return;
+    // On first waypoint, cache expanded bounds (3x current viewport) and preload DEM
+    if (waypoints.length === 0 && bounds) {
+      const latSpan = bounds.north - bounds.south;
+      const lngSpan = bounds.east - bounds.west;
+      const expandedBounds: Bounds = {
+        north: bounds.north + latSpan,
+        south: bounds.south - latSpan,
+        east: bounds.east + lngSpan,
+        west: bounds.west - lngSpan,
+      };
+      setCachedBounds(expandedBounds);
+      // Preload DEM to IndexedDB in the background
+      preloadDEM(bounds, { expansionFactor: 3 }).catch(console.warn);
     }
     setWaypoints([...waypoints, point]);
   }
@@ -95,15 +237,35 @@ export default function PathFinderPage() {
     setWaypoints([]);
     setPath(null);
     setBounds(null);
+    setCachedBounds(null);
     setIsLoading(false);
     setPathAspects(null);
     setAspectRaster(null);
     setExplorationNodes([]);
+    explorationStartTimeRef.current = 0;
+    explorationCountRef.current = 0;
+    lastAutoPathfindingCount.current = 0;
   }
 
   // Callback for exploration updates from pathfinder
+  // Only show frontier (current batch), not accumulated nodes
   const handleExplorationUpdate = useCallback((nodes: ExplorationNode[]) => {
-    setExplorationNodes((prev) => [...prev, ...nodes]);
+    explorationCountRef.current += nodes.length;
+    // Replace with just the frontier nodes (current batch)
+    setExplorationNodes(nodes);
+  }, []);
+
+  // Clear exploration nodes when starting a new pathfinding run
+  const handleStartPathfinding = useCallback(() => {
+    setExplorationNodes([]);
+    explorationStartTimeRef.current = Date.now();
+    explorationCountRef.current = 0;
+  }, []);
+
+  // Called when exploration queue is fully processed
+  const handleExplorationComplete = useCallback(() => {
+    // Clear the frontier visualization after animation completes
+    setExplorationNodes([]);
   }, []);
 
   const handleSetPath = useCallback(
@@ -151,6 +313,16 @@ export default function PathFinderPage() {
   );
 
   const handleLocationSelect = useCallback((center: [number, number]) => {
+    // Reset everything when searching for a new location
+    setWaypoints([]);
+    setPath(null);
+    setCachedBounds(null);
+    setPathAspects(null);
+    setAspectRaster(null);
+    setExplorationNodes([]);
+    explorationStartTimeRef.current = 0;
+    explorationCountRef.current = 0;
+    lastAutoPathfindingCount.current = 0;
     setMapCenter(center);
   }, []);
 
@@ -195,9 +367,108 @@ export default function PathFinderPage() {
     saveAs(blob, "path.gpx");
   };
 
+  const handleImportGpx = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      // Dynamic import to avoid SSR issues
+      const toGeoJSON = await import("@tmcw/togeojson");
+      const parser = new DOMParser();
+      const gpxDoc = parser.parseFromString(text, "application/xml");
+      const geoJson = toGeoJSON.gpx(gpxDoc);
+
+      // Find the first LineString or MultiLineString in the GeoJSON
+      let lineCoords: number[][] | null = null;
+      for (const feature of geoJson.features) {
+        if (feature.geometry.type === "LineString") {
+          lineCoords = feature.geometry.coordinates as number[][];
+          break;
+        } else if (feature.geometry.type === "MultiLineString") {
+          // Flatten MultiLineString into a single LineString
+          lineCoords = (feature.geometry.coordinates as number[][][]).flat();
+          break;
+        }
+      }
+
+      if (!lineCoords || lineCoords.length === 0) {
+        console.warn("No track found in GPX file");
+        return;
+      }
+
+      // Clear existing state
+      setPathAspects(null);
+      setAspectRaster(null);
+      setExplorationNodes([]);
+      explorationStartTimeRef.current = 0;
+      explorationCountRef.current = 0;
+      lastAutoPathfindingCount.current = 0;
+
+      // Set the imported path (preserve elevation if available)
+      const importedPath: LineString = {
+        type: "LineString",
+        coordinates: lineCoords.map(coord => 
+          coord.length >= 3 ? [coord[0], coord[1], coord[2]] : [coord[0], coord[1], 0]
+        ),
+      };
+      setPath(importedPath);
+
+      // Add waypoints at start and end so user can continue adding to the path
+      const startCoord = lineCoords[0];
+      const endCoord = lineCoords[lineCoords.length - 1];
+      const importedWaypoints: Point[] = [
+        { type: "Point", coordinates: [startCoord[0], startCoord[1]] },
+        { type: "Point", coordinates: [endCoord[0], endCoord[1]] },
+      ];
+      setWaypoints(importedWaypoints);
+      // Prevent auto-pathfinding from triggering for imported waypoints
+      lastAutoPathfindingCount.current = importedWaypoints.length;
+
+      // Compute bounds from the track with some padding
+      const lons = lineCoords.map(c => c[0]);
+      const lats = lineCoords.map(c => c[1]);
+      const minLon = Math.min(...lons);
+      const maxLon = Math.max(...lons);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      
+      // Add padding (10% on each side)
+      const lonPadding = (maxLon - minLon) * 0.1;
+      const latPadding = (maxLat - minLat) * 0.1;
+      
+      const trackBounds: Bounds = {
+        north: maxLat + latPadding,
+        south: minLat - latPadding,
+        east: maxLon + lonPadding,
+        west: minLon - lonPadding,
+      };
+      
+      // Set cached bounds to trigger azimuth preloading
+      setCachedBounds(trackBounds);
+
+      // Fit the map to the imported track bounds (with delay for dock to appear)
+      setMapFitBounds(trackBounds);
+    } catch (error) {
+      console.error("Failed to import GPX:", error);
+    }
+
+    // Reset the input so the same file can be imported again
+    event.target.value = "";
+  }, []);
+
   // Shared panel content
   const panelContent = (
     <>
+      {/* Hidden file input for GPX import - always rendered */}
+      <input
+        ref={gpxInputRef}
+        type="file"
+        accept=".gpx"
+        className="hidden"
+        onChange={handleImportGpx}
+      />
+
       {/* Header - hidden in portrait */}
       {!isPortrait && (
         <div className="p-4 border-b">
@@ -221,8 +492,25 @@ export default function PathFinderPage() {
               <div className="flex-1 min-w-0">
                 <LocationSearch onLocationSelect={handleLocationSelect} />
               </div>
-              <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-9 w-9">
+              <Button 
+                variant="outline" 
+                onClick={handleUndo} 
+                size="icon" 
+                className="shrink-0 h-9 w-9"
+                disabled={waypoints.length === 0}
+              >
+                <Undo2 className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-9 w-9" disabled={waypoints.length === 0}>
                 <RotateCcw className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="shrink-0 h-9 w-9"
+                onClick={() => gpxInputRef.current?.click()}
+              >
+                <Upload className="h-4 w-4" />
               </Button>
               <Button
                 variant="outline"
@@ -255,7 +543,7 @@ export default function PathFinderPage() {
             <div className="flex gap-2">
               <FindPathButton
                 waypoints={waypoints}
-                bounds={bounds}
+                bounds={cachedBounds}
                 maxGradient={maxGradient}
                 excludedAspects={excludedAspects}
                 isLoading={isLoading}
@@ -264,6 +552,10 @@ export default function PathFinderPage() {
                 setPathAspects={handleSetPathAspects}
                 setAspectRaster={handleSetAspectRaster}
                 onExplorationUpdate={handleExplorationUpdate}
+                onExplorationComplete={handleExplorationComplete}
+                onStartPathfinding={handleStartPathfinding}
+                onlyLastSegment={path !== null}
+                preloadBounds={cachedBounds}
                 className="flex-1"
               />
               <SelectAspectsDialog
@@ -320,13 +612,10 @@ export default function PathFinderPage() {
                         <GradientCDF mappables={[{ polyline: path, name: "Path", id: "path" }]} />
                       )}
                     </div>
-                    {/* Aspect chart - small */}
+                    {/* Aspect chart - full width square */}
                     {pathAspects && (
-                      <div className="flex items-center gap-2">
-                        <div className="w-[60px] h-[60px]">
-                          <AspectChart aspectPoints={pathAspects} />
-                        </div>
-                        <span className="text-xs text-muted-foreground">Aspect Distribution</span>
+                      <div className="w-full aspect-square">
+                        <AspectChart aspectPoints={pathAspects} />
                       </div>
                     )}
                   </div>
@@ -356,18 +645,12 @@ export default function PathFinderPage() {
               />
             </div>
 
-            {/* Excluded Aspects */}
-            <SelectAspectsDialog
-              onSelectDirections={setExcludedAspects}
-              selectedDirections={excludedAspects}
-            />
-
             {/* Actions */}
             <div className="space-y-2">
               <FindPathButton
                 ref={findPathRef}
                 waypoints={waypoints}
-                bounds={bounds}
+                bounds={cachedBounds}
                 maxGradient={maxGradient}
                 excludedAspects={excludedAspects}
                 isLoading={isLoading}
@@ -376,12 +659,37 @@ export default function PathFinderPage() {
                 setPathAspects={handleSetPathAspects}
                 setAspectRaster={handleSetAspectRaster}
                 onExplorationUpdate={handleExplorationUpdate}
+                onExplorationComplete={handleExplorationComplete}
+                onStartPathfinding={handleStartPathfinding}
+                onlyLastSegment={path !== null}
+                preloadBounds={cachedBounds}
                 className="w-full"
               />
               <div className="flex gap-2">
-                <Button variant="outline" onClick={handleReset} className="flex-1" size="sm">
+                <Button 
+                  variant="outline" 
+                  onClick={handleUndo} 
+                  className="flex-1" 
+                  size="sm"
+                  disabled={waypoints.length === 0}
+                >
+                  <Undo2 className="h-4 w-4 mr-1" />
+                  Undo
+                </Button>
+                <Button variant="outline" onClick={handleReset} className="flex-1" size="sm" disabled={waypoints.length === 0}>
                   <RotateCcw className="h-4 w-4 mr-1" />
                   Reset
+                </Button>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => gpxInputRef.current?.click()}
+                  className="flex-1"
+                >
+                  <Upload className="h-4 w-4 mr-1" />
+                  Import
                 </Button>
                 <Button
                   variant="outline"
@@ -391,17 +699,21 @@ export default function PathFinderPage() {
                   className="flex-1"
                 >
                   <Download className="h-4 w-4 mr-1" />
-                  Export GPX
+                  Export
                 </Button>
               </div>
             </div>
 
+            {/* Excluded Aspects - above aspect chart */}
+            <SelectAspectsDialog
+              onSelectDirections={setExcludedAspects}
+              selectedDirections={excludedAspects}
+            />
+
             {/* Aspect Chart - only show when path exists */}
             {path && pathAspects && (
-              <div className="pt-4 border-t">
-                <div className="w-full aspect-square max-w-[200px] mx-auto">
-                  <AspectChart aspectPoints={pathAspects} />
-                </div>
+              <div className="w-full aspect-square">
+                <AspectChart aspectPoints={pathAspects} />
               </div>
             )}
           </div>
@@ -453,25 +765,26 @@ export default function PathFinderPage() {
           <LazyPolylineMap interactive={true}>
             <LeafletPathfindingLayer
               markers={waypoints}
-              showLine={path == null}
+              showLine={false}
               onMapClick={handleMapClick}
               onBoundsChange={handleBoundsChange}
               mapCenter={mapCenter}
+              fitBounds={mapFitBounds}
             />
-            {/* Exploration visualization during pathfinding */}
-            {isLoading && explorationNodes.length > 0 && (
+            {/* Exploration visualization during pathfinding - show frontier */}
+            {explorationNodes.length > 0 && (
               <LeafletExplorationLayer
                 nodes={explorationNodes}
-                fadeOutDuration={3000}
-                persistDuration={1000}
+                fadeOutDuration={0}
+                persistDuration={100000}
                 radius={3}
-                color="rgba(59, 130, 246, 0.7)"
+                color="rgba(59, 130, 246, 0.8)"
               />
             )}
-            {path && bounds && pathAspects && (
+            {path && bounds && (
               <GeoJSONLayer
                 polyline={path}
-                polylineProperties={pathAspects}
+                polylineProperties={pathAspects ?? undefined}
                 interactive={true}
                 hoverIndexStore={defaultHoverIndexStore}
               />

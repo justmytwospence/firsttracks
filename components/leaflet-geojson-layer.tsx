@@ -59,15 +59,29 @@ export default function GeoJSONLayer({
   useEffect(() => {
     if (!polyline || features.length === 0) return;
 
-    // Create GeoJSON layer
+    // Create GeoJSON layer with initial opacity 0 for fade-in
     geoJsonRef.current = L.geoJSON(
       { type: "FeatureCollection", features } as FeatureCollection,
       {
         style: {
           color: "black",
+          opacity: 0,
         },
       }
     ).addTo(map);
+
+    // Fade in animation
+    let opacity = 0;
+    const fadeIn = () => {
+      opacity += 0.05;
+      if (opacity >= 1) {
+        geoJsonRef.current?.setStyle({ opacity: 1 });
+      } else {
+        geoJsonRef.current?.setStyle({ opacity });
+        requestAnimationFrame(fadeIn);
+      }
+    };
+    requestAnimationFrame(fadeIn);
 
     // Center and zoom the map to fit the GeoJSON layer
     if (geoJsonRef.current) {
