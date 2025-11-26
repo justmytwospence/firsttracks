@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import type { Aspect } from "@/pathfinder/index.d.ts";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
+import { forwardRef } from "react";
 import { toast } from "sonner";
 
 interface FindPathButtonProps {
@@ -18,19 +19,25 @@ interface FindPathButtonProps {
     azimuthRaster: Uint8Array,
     gradientRaster: Uint8Array
   ) => void;
+  className?: string;
 }
 
-export default function FindPathButton({
-  waypoints,
-  bounds,
-  maxGradient,
-  excludedAspects,
-  isLoading,
-  setIsLoading,
-  setPath,
-  setPathAspects,
-  setAspectRaster,
-}: FindPathButtonProps) {
+const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
+  function FindPathButton(
+    {
+      waypoints,
+      bounds,
+      maxGradient,
+      excludedAspects,
+      isLoading,
+      setIsLoading,
+      setPath,
+      setPathAspects,
+      setAspectRaster,
+      className,
+    },
+    ref
+  ) {
   async function handleClick() {
     if (!bounds) return;
     setIsLoading(true);
@@ -43,34 +50,35 @@ export default function FindPathButton({
       excludedAspects
     );
 
+    const loadingToastId = "pathfinder-loading";
     let pathSegmentCounter = 0;
+    
     for await (const result of pathGenerator) {
       switch (result.type) {
         case "info":
-          toast.dismiss();
-          toast.message(result.message, { duration: Number.POSITIVE_INFINITY });
+          toast.message(result.message, { id: loadingToastId, duration: Number.POSITIVE_INFINITY });
           break;
         case "success":
-          toast.dismiss();
+          toast.dismiss(loadingToastId);
           toast.success(result.message);
           break;
         case "warning":
           toast.warning(result.message);
           break;
         case "error":
-          toast.dismiss();
+          toast.dismiss(loadingToastId);
           toast.error(result.message);
           setIsLoading(false);
           break;
         case "rasterResult": {
-          toast.dismiss();
+          toast.dismiss(loadingToastId);
           toast.success("Azimuths and gradients computed");
           const { elevations, azimuths, gradients } = result.result;
           setAspectRaster(new Uint8Array(azimuths), new Uint8Array(gradients));
           break;
         }
         case "geoJsonResult": {
-          toast.dismiss();
+          toast.dismiss(loadingToastId);
           toast.success("Path found!");
           const path = {
             type: "LineString",
@@ -85,12 +93,14 @@ export default function FindPathButton({
         }
       }
     }
+    toast.dismiss(loadingToastId);
     setIsLoading(false);
   }
 
   return (
     <Button
-      className="flex-1"
+      ref={ref}
+      className={className || "flex-1"}
       onClick={handleClick}
       disabled={waypoints.length < 2}
     >
@@ -104,4 +114,7 @@ export default function FindPathButton({
       )}
     </Button>
   );
-}
+  }
+);
+
+export default FindPathButton;

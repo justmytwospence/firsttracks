@@ -16,7 +16,7 @@ import {
   Tooltip,
 } from "chart.js";
 import { LineString } from "geojson";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Line } from "react-chartjs-2";
 
 ChartJS.register(
@@ -33,8 +33,36 @@ const CHART_COLORS = ["#3b82f6", "#64748b", "#f43f5e"];
 
 export default function GradientCdfChart({ mappables }: { mappables: Mappable[] }) {
   const chartRef = useRef<ChartJS<"line">>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { setHoveredGradient } = gradientStore();
   const [isGradientLocked, setIsGradientLocked] = useState(false);
+
+  // Resize chart when container size changes (e.g., sidebar toggle)
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (chartRef.current) {
+        chartRef.current.resize();
+      }
+    });
+
+    resizeObserver.observe(container);
+
+    // Also handle transition end events
+    const handleTransitionEnd = () => {
+      if (chartRef.current) {
+        chartRef.current.resize();
+      }
+    };
+    document.addEventListener('transitionend', handleTransitionEnd);
+
+    return () => {
+      resizeObserver.disconnect();
+      document.removeEventListener('transitionend', handleTransitionEnd);
+    };
+  }, []);
 
   // baseLogger.info(JSON.stringify(mappables[0].polyline, null, 2));
 
@@ -160,6 +188,7 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
 
   return (
     <div
+      ref={containerRef}
       className="w-full h-full p-4"
       onMouseLeave={() => {
         setIsGradientLocked(false);

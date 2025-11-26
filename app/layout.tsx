@@ -1,10 +1,7 @@
-import Footer from "@/components/footer";
-import Topbar from "@/components/topbar";
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import ReactProviders from "./providers";
 import "./globals.css";
-import { auth } from "@/auth";
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -18,27 +15,22 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Vertfarm",
-  description: "Tools for people who like to farm vert",
+  title: "Pathfinder",
+  description: "Interactive terrain-aware route planning with DEM analysis",
 };
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await auth();
   return (
     <html lang="en">
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased relative`}
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <ReactProviders session={session}>
-          <div className="min-h-screen flex flex-col">
-            <Topbar />
-            <main className="flex-1 w-full max-w-screen-xl mx-auto px-4 sm:px-6 lg:px-8">{children}</main>
-            <Footer />
-          </div>
+        <ReactProviders>
+          {children}
         </ReactProviders>
       </body>
     </html>

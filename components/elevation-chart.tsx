@@ -39,8 +39,36 @@ export default function ElevationChart({
   hoverIndexStore?: HoverIndexStore;
 }) {
   const chartRef = useRef<ChartJS<"line">>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { setHoverIndex } = hoverIndexStore();
   const { hoveredGradient } = gradientStore();
+
+  // Resize chart when container size changes (e.g., sidebar toggle)
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (chartRef.current) {
+        chartRef.current.resize();
+      }
+    });
+
+    resizeObserver.observe(container);
+
+    // Also handle transition end events
+    const handleTransitionEnd = () => {
+      if (chartRef.current) {
+        chartRef.current.resize();
+      }
+    };
+    document.addEventListener('transitionend', handleTransitionEnd);
+
+    return () => {
+      resizeObserver.disconnect();
+      document.removeEventListener('transitionend', handleTransitionEnd);
+    };
+  }, []);
 
   // Compute values immediately
   const computedDistances = computeDistanceMiles(polyline.coordinates);
@@ -240,7 +268,11 @@ export default function ElevationChart({
       }
     });
     return unsubHoverIndex;
-  }, [computedDistances, elevation, hoverIndexStore]);
+  }, [hoverIndexStore]);
 
-  return <Line ref={chartRef} data={initialData} options={initialOptions} />;
+  return (
+    <div ref={containerRef} className="h-full w-full">
+      <Line ref={chartRef} data={initialData} options={initialOptions} />
+    </div>
+  );
 }

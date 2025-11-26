@@ -3,8 +3,48 @@
 import { baseLogger } from "@/lib/logger";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useRef, useState } from "react";
-import { MapContainer, TileLayer } from "react-leaflet";
+import { useEffect, useRef, useState } from "react";
+import { MapContainer, TileLayer, ZoomControl, useMap } from "react-leaflet";
+
+// Component to handle map resize when container size changes
+function MapResizeHandler() {
+  const map = useMap();
+
+  useEffect(() => {
+    const container = map.getContainer();
+
+    // Handle resize observer for container size changes
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        map.invalidateSize();
+      });
+    });
+
+    resizeObserver.observe(container);
+
+    // Also observe parent elements to catch flex layout changes
+    let parent = container.parentElement;
+    while (parent && parent !== document.body) {
+      resizeObserver.observe(parent);
+      parent = parent.parentElement;
+    }
+
+    // Handle transition end events on ancestors (for sidebar/dock animations)
+    const handleTransitionEnd = () => {
+      map.invalidateSize();
+    };
+
+    // Listen for transitions on the whole document
+    document.addEventListener('transitionend', handleTransitionEnd);
+
+    return () => {
+      resizeObserver.disconnect();
+      document.removeEventListener('transitionend', handleTransitionEnd);
+    };
+  }, [map]);
+
+  return null;
+}
 
 interface LeafletMapProps {
   interactive?: boolean;
@@ -21,7 +61,7 @@ export default function LeafletMap(props: LeafletMapProps) {
       style={{ height: "100%", width: "100%" }}
       center={defaultCenter}
       zoom={13}
-      zoomControl={props.interactive}
+      zoomControl={false}
       scrollWheelZoom={props.interactive}
       dragging={props.interactive}
       attributionControl={props.interactive}
@@ -29,7 +69,9 @@ export default function LeafletMap(props: LeafletMapProps) {
       zoomAnimation={props.interactive}
       ref={mapRef}
     >
-      <TileLayer url="https://tile.jawg.io/jawg-terrain/{z}/{x}/{y}{r}.png?access-token=bDE5WHMnFV1P973D59QWuGaq6hebBcjPSyud6vVGYqqi2r4kZyaShdbC3SF2Bc7y" />
+      <TileLayer url={`https://tile.jawg.io/jawg-terrain/{z}/{x}/{y}{r}.png?access-token=${process.env.NEXT_PUBLIC_JAWG_ACCESS_TOKEN}`} />
+      <MapResizeHandler />
+      {props.interactive && <ZoomControl position="bottomright" />}
       {props.children}
     </MapContainer>
   );

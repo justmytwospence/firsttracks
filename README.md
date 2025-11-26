@@ -1,79 +1,51 @@
-# Vertfarm
+# Pathfinder
 
-Advanced route analysis and comparison tools for Strava users who like to farm vert. Work in Progress.
+Interactive terrain-aware route planning with DEM analysis. Click-to-place waypoints on a map and find optimal paths using terrain analysis.
+
+## Features
+
+- **Interactive Map**: Click to place waypoints on a Leaflet terrain map
+- **Pathfinding**: Find optimal paths using a Rust NAPI-RS module with DEM analysis
+- **Aspect Analysis**: Visualize terrain aspects with a raster overlay; exclude certain aspects from pathfinding
+- **Gradient Control**: Set maximum gradient constraints for the pathfinding algorithm
+- **Elevation Profile**: View the elevation profile of your planned route
+- **Gradient Distribution**: Analyze the gradient distribution with a CDF chart
+- **Aspect Distribution**: See the aspect distribution of your route
+- **GPX Export**: Download your planned route as a GPX file
 
 ## Tech Stack
 
-- **Framework** React 19
-- **Meta Framework:** Next.js 15 with App Router
-- **Deployment** Vercel
-- **Authentication:** NextAuth.js v5
-- **State management** Zustand
-- **Database:** PostgreSQL with Prisma ORM
-- **GIS** PostGIS
-- **Styling:** Tailwind CSS, shadcn/ui
-- **Maps:** Leaflet, React Leaflet
-- **Charts:** Chart.js
-- **Route/Course data:** Strava API
-- **Type Safety:** TypeScript, Zod
-- **Rust WASM** napi-rs
-- **Pathfinding algorithm** pathfinding.rs
-- **Azimuths analysis**  Custom Sobel filter
-- **DEM data** Open Topography API
+- **Framework**: React 19, Next.js 15 with App Router
+- **Deployment**: Vercel
+- **State**: Zustand
+- **Styling**: Tailwind CSS, shadcn/ui
+- **Maps**: Leaflet, React Leaflet
+- **Charts**: Chart.js
+- **Rust Integration**: NAPI-RS pathfinding module
+- **Pathfinding Algorithm**: pathfinding.rs
+- **Terrain Analysis**: Custom Sobel filter for aspect computation
+- **DEM Data**: OpenTopography API
 
-## Environment variables
+## Environment Variables
 
-```
-DATABASE_URL=""
-STRAVA_CLIENT_ID=""
-STRAVA_CLIENT_SECRET=""
-AUTH_SECRET="" # Added by `npx auth`.
-STRAVA_WEBHOOK_VERIFY_TOKEN=""
+```bash
+NEXT_PUBLIC_JAWG_ACCESS_TOKEN="" # Jawg Maps tile layer
+OPEN_TOPO_API_KEY="" # OpenTopography DEM data
 ```
 
-## Branches/Deployment
+## Development
 
-- **Production**: The `main` branch is automatically deployed to $DOMAIN and migrations are run against the production database.
-- **Staging**: The `staging` branch is automatically deployed to the staging.$DOMAIN and migrations are run against the staging database.
+```bash
+# Install dependencies
+npm install
 
-## TODO
+# Build the Rust pathfinding module
+cd pathfinder && npm run build && cd ..
 
-- [x] Set up database
-- [x] Implement authentication
-- [x] Integrate Strava API for fetching routes
-- [x] Add maps using Leaflet and React Leaflet
-- [x] Implement logging with Winston
-- [x] Ensure type safety with TypeScript and Zod
-- [x] Set up deployment pipeline
-- [x] Create route comparison tools
-- [x] Implement logic for dealing with Strava rate limits
-- [x] Implement webhook for account deletion per API terms
-- [x] Refactor functions to take userId instead of session
-- [x] Handle rate limiting using the headers from Strava
-- [x] Implement webhook for new activites
-- [x] Split sync into route and activity
-- [x] Sync SegmentEffort and Segment models
-- [X] Map brushed linking
-- [X] add isEnriched flag to data models
-- [X] Show mappable activities in the Routes page
-- [X] Exclude current filter from dropdown
-- [X] Exclude current sort from dropdown
-- [X] use React Portal for syncing toasts
-- [X] Implement sort order toggle
-- [X] Fix pagination
-- [X] Add activities to course comparison
-- [X] Store the access token in the JWT to bypass account lookups
-- [X] Verify token refresh is working
-- [ ] Add Streams model
-- [ ] Sync Activity streams
-- [ ] Show streams in Activity detail page
-- [ ] Implement power-duration/gradient curve
-- [ ] Increase athlete headcount
-- pathfinder
-  - [X] Fix map implementation
-  - [X] Change polyline color
-  - [X] Save to Strava
-  - [X] Improve Aspect categorization
-  - [X] Set raster opacity by gradient
-  - [ ] Hide charts at the beginning
-  - [ ] Cache geotiffs
+# Start development server
+npm run dev
+```
+
+## Deployment
+
+The app is deployed to Vercel. The Rust module is built during the Vercel build process.

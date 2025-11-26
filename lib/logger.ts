@@ -3,4 +3,57 @@ import log from "loglevel";
 const level = process.env.LOG_LEVEL || "info";
 log.setLevel(level as log.LogLevelDesc);
 
-export const baseLogger = log;
+// Enhanced logger with debug capabilities
+export const baseLogger = {
+  ...log,
+  
+  // Debug method with structured data support
+  debugSync: (message: string, data?: any, category?: string) => {
+    if (log.getLevel() <= log.levels.DEBUG) {
+      const prefix = category ? `[${category.toUpperCase()}]` : '[DEBUG]';
+      if (data) {
+        log.debug(`${prefix} ${message}`, JSON.stringify(data, null, 2));
+      } else {
+        log.debug(`${prefix} ${message}`);
+      }
+    }
+  },
+
+  // API request/response logging
+  apiRequest: (method: string, url: string, headers?: any) => {
+    log.debug(`[API] ${method} ${url}`, headers ? { headers } : undefined);
+  },
+
+  apiResponse: (method: string, url: string, status: number, duration?: number) => {
+    const durationText = duration ? ` (${duration}ms)` : '';
+    log.debug(`[API] ${method} ${url} -> ${status}${durationText}`);
+  },
+
+  // Strava-specific logging
+  stravaSync: (message: string, data?: any) => {
+    log.info(`[STRAVA-SYNC] ${message}`, data);
+  },
+
+  stravaError: (message: string, error: any, context?: any) => {
+    log.error(`[STRAVA-ERROR] ${message}`, { error: error?.message || error, context });
+  },
+
+  // Database operation logging
+  dbQuery: (operation: string, table: string, duration?: number) => {
+    const durationText = duration ? ` (${duration}ms)` : '';
+    log.debug(`[DB] ${operation} on ${table}${durationText}`);
+  },
+
+  // Performance timing
+  time: (label: string) => {
+    if (typeof performance !== 'undefined') {
+      console.time(label);
+    }
+  },
+
+  timeEnd: (label: string) => {
+    if (typeof performance !== 'undefined') {
+      console.timeEnd(label);
+    }
+  },
+};

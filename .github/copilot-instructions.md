@@ -1,71 +1,35 @@
-# Vertfarm - AI Agent Instructions
+# Pathfinder - AI Agent Instructions
 
 ## Core Architecture
 
-This is a **Next.js 15 + App Router** application for advanced Strava route analysis with GIS capabilities. Key components:
+This is a **Next.js 15 + App Router** application for interactive terrain-aware route planning with GIS capabilities. Key components:
 
-- **Authentication**: NextAuth.js v5 with Strava OAuth (JWT strategy)
-- **Database**: PostgreSQL + PostGIS with Prisma ORM (preview features enabled)
 - **State**: Zustand stores with `subscribeWithSelector` middleware
 - **UI**: shadcn/ui + Tailwind CSS, custom Leaflet maps, Chart.js
 - **Rust Integration**: NAPI-RS pathfinding module with DEM processing
 
-## Critical Patterns
+## Key Features
 
-### Data Model Hierarchy
-- **Base models**: `Activity`, `Route`, `Segment` (from Strava API)
-- **Mappable types**: Models with `summaryPolyline` (GeoJSON LineString)
-- **Enriched types**: Mappable + full `polyline` + `enrichedAt` timestamp
-- Use type guards: `isMappableActivity()`, `isEnrichedRoute()`, etc.
-
-### Strava API Integration
-- **Rate limiting**: Custom `StravaHttpError` with rate limit headers
-- **Token refresh**: Automatic in JWT callback (`lib/strava/auth.ts`)
-- **Brand compliance**: Must use `StravaAttribution` + `ViewOnStravaLink` components
-- **Webhooks**: Handle create/update/delete events at `/api/strava-webhook`
-
-### Database Patterns
-- **Composite keys**: `id_userId` for user-scoped resources
-- **Enrichment workflow**: Base → Mappable → Enriched (with streams/geometry)
-- **GeoJSON storage**: Use `/// [LineStringType]` Prisma comments for type generation
-- **Snake/camel conversion**: Use `convertKeysToCamelCase()` for API responses
-
-### Server Actions Structure
-```typescript
-// Pattern: actions/fetchEntity.ts
-"use server";
-const session = await auth();
-const entity = await queryEntity(session.user.id, id);
-if (!isEnriched(entity) || entity.enrichedAt < entity.updatedAt) {
-  return await enrichEntity(session.user.id, id, apiData);
-}
-```
+- Click-to-place waypoints on an interactive Leaflet map
+- Find optimal paths using Rust NAPI-RS module with DEM analysis
+- Download DEM data from OpenTopo API
+- Compute azimuths/gradients and display aspect raster overlay
+- Export path as GPX
+- Display elevation profile, gradient CDF, and aspect distribution charts
 
 ## Development Workflows
 
-- **Database**: `npx prisma migrate dev` for schema changes
 - **Rust module**: Build with `npm run build` in `/pathfinder`
-- **Type safety**: Zod schemas for all external APIs (`lib/strava/schemas/`)
-- **Logging**: Winston logger with file rotation (`lib/logger.ts`)
-
-## Key Constraints
-
-- **Middleware**: Auth required except `/api/*`, `/login`, `/pathfinder`, static assets
-- **Root redirect**: `/` → `/pathfinder`
-- **User scope**: All queries must include `userId` parameter
-- **Error boundaries**: Use server actions for data fetching, not client-side API calls
+- **Dev server**: `npm run dev`
 
 ## Environment Requirements
 ```bash
-DATABASE_URL="" # PostgreSQL with PostGIS
-STRAVA_CLIENT_ID=""
-STRAVA_CLIENT_SECRET=""
-AUTH_SECRET=""
-STRAVA_WEBHOOK_VERIFY_TOKEN=""
+NEXT_PUBLIC_JAWG_ACCESS_TOKEN="" # Jawg Maps tile layer
+OPEN_TOPO_API_KEY="" # OpenTopography DEM data
 ```
 
 ## Miscellaneous
 
 - Don't make changes unrelated to the immediate request. 
 - When implementing complex features, explain the step-by-step approach first.
-- Code comments should not be made in reference to previoius versions of the code, they should only explain the current version of the code, where it is especially useful or necessary to understand the logic.kkkkkk
+- Code comments should not be made in reference to previous versions of the code, they should only explain the current version of the code, where it is especially useful or necessary to understand the logic.

@@ -143,7 +143,7 @@ export function AspectChart({ aspectPoints }: AspectChartProps) {
 
   return (
     <div 
-      className="w-full h-full min-h-[300px] flex items-center justify-center"
+      className="w-full h-full flex items-center justify-center"
       onMouseLeave={() => {
         if (!isAspectLocked) {
           setHoveredAspect(null);

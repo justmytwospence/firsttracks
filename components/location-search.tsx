@@ -105,24 +105,24 @@ export default function LocationSearch({
   };
 
   return (
-    <div className="w-[250px] relative">
+    <div className="w-full relative">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <div className="w-full flex items-center gap-2 px-3 py-2 border rounded-md bg-background text-sm">
-            <Search className="h-4 w-4 text-muted-foreground" />
+            <Search className="h-4 w-4 text-muted-foreground shrink-0" />
             <input
               placeholder="Search locations..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full bg-transparent border-none outline-none"
+              className="w-full bg-transparent border-none outline-none min-w-0"
             />
           </div>
         </PopoverTrigger>
         <PopoverContent
-          className="w-[250px] p-0"
+          className="w-[var(--radix-popover-trigger-width)] p-0"
           align="start"
-          onKeyDown={handleKeyDown} // Add onKeyDown handler here
-          tabIndex={-1} // Make PopoverContent focusable
+          onKeyDown={handleKeyDown}
+          tabIndex={-1}
         >
           <Command>
             <CommandList>
