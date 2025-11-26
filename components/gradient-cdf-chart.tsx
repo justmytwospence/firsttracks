@@ -1,10 +1,16 @@
 "use client";
 
 import { computeCdf, computeGradient } from "@/lib/geo/geo";
-import { baseLogger } from "@/lib/logger";
 import { gradientStore } from "@/store";
-import type { Mappable } from "@prisma/client";
 import type { ActiveElement, ChartEvent, ChartOptions } from "chart.js";
+import type { LineString } from "geojson";
+
+// Local type for mappable objects with polyline data
+interface Mappable {
+  id: string;
+  name: string;
+  polyline: LineString;
+}
 import {
   CategoryScale,
   Chart as ChartJS,
@@ -15,7 +21,6 @@ import {
   Title,
   Tooltip,
 } from "chart.js";
-import { LineString } from "geojson";
 import { useEffect, useRef, useState } from "react";
 import { Line } from "react-chartjs-2";
 
@@ -42,29 +47,30 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
     const container = containerRef.current;
     if (!container) return;
 
-    const resizeObserver = new ResizeObserver(() => {
-      if (chartRef.current) {
-        chartRef.current.resize();
-      }
-    });
-
-    resizeObserver.observe(container);
-
-    // Also handle transition end events
-    const handleTransitionEnd = () => {
+    const resizeChart = () => {
       if (chartRef.current) {
         chartRef.current.resize();
       }
     };
+
+    const resizeObserver = new ResizeObserver(resizeChart);
+    resizeObserver.observe(container);
+
+    // Handle transition end with a small delay to ensure layout has settled
+    const handleTransitionEnd = () => {
+      setTimeout(resizeChart, 50);
+    };
     document.addEventListener('transitionend', handleTransitionEnd);
+
+    // Also listen for window resize
+    window.addEventListener('resize', resizeChart);
 
     return () => {
       resizeObserver.disconnect();
       document.removeEventListener('transitionend', handleTransitionEnd);
+      window.removeEventListener('resize', resizeChart);
     };
   }, []);
-
-  // baseLogger.info(JSON.stringify(mappables[0].polyline, null, 2));
 
   // Compute gradients and get range
   const gradients = mappables.map((mappable) => {

@@ -29,20 +29,7 @@ export const baseLogger = {
     log.debug(`[API] ${method} ${url} -> ${status}${durationText}`);
   },
 
-  // Strava-specific logging
-  stravaSync: (message: string, data?: any) => {
-    log.info(`[STRAVA-SYNC] ${message}`, data);
-  },
 
-  stravaError: (message: string, error: any, context?: any) => {
-    log.error(`[STRAVA-ERROR] ${message}`, { error: error?.message || error, context });
-  },
-
-  // Database operation logging
-  dbQuery: (operation: string, table: string, duration?: number) => {
-    const durationText = duration ? ` (${duration}ms)` : '';
-    log.debug(`[DB] ${operation} on ${table}${durationText}`);
-  },
 
   // Performance timing
   time: (label: string) => {

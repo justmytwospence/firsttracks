@@ -5,7 +5,8 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 ## Features
 
 - **Interactive Map**: Click to place waypoints on a Leaflet terrain map
-- **Pathfinding**: Find optimal paths using a Rust NAPI-RS module with DEM analysis
+- **Pathfinding**: Find optimal paths using a Rust WASM module with A* algorithm
+- **Real-time Visualization**: Watch the pathfinding algorithm explore the terrain
 - **Aspect Analysis**: Visualize terrain aspects with a raster overlay; exclude certain aspects from pathfinding
 - **Gradient Control**: Set maximum gradient constraints for the pathfinding algorithm
 - **Elevation Profile**: View the elevation profile of your planned route
@@ -21,10 +22,10 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 - **Styling**: Tailwind CSS, shadcn/ui
 - **Maps**: Leaflet, React Leaflet
 - **Charts**: Chart.js
-- **Rust Integration**: NAPI-RS pathfinding module
-- **Pathfinding Algorithm**: pathfinding.rs
+- **Rust Integration**: WebAssembly via wasm-bindgen, running in a Web Worker
+- **Pathfinding Algorithm**: A* via pathfinding.rs crate
 - **Terrain Analysis**: Custom Sobel filter for aspect computation
-- **DEM Data**: OpenTopography API
+- **DEM Data**: OpenTopography API (cached in IndexedDB)
 
 ## Environment Variables
 
@@ -39,13 +40,24 @@ OPEN_TOPO_API_KEY="" # OpenTopography DEM data
 # Install dependencies
 npm install
 
-# Build the Rust pathfinding module
-cd pathfinder && npm run build && cd ..
+# Build the Rust WASM module
+npm run build:wasm
 
 # Start development server
 npm run dev
+
+# Full production build
+npm run build
 ```
+
+## Architecture
+
+The pathfinding runs entirely client-side:
+1. DEM tiles are fetched via `/api/dem` proxy (keeps API key secret)
+2. Tiles are cached in IndexedDB for offline/repeat use
+3. WASM module runs in a Web Worker for non-blocking UI
+4. Exploration updates stream back to main thread for real-time visualization
 
 ## Deployment
 
-The app is deployed to Vercel. The Rust module is built during the Vercel build process.
+The app is deployed to Vercel. The WASM module is built during the Vercel build process.

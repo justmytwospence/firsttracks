@@ -33,8 +33,7 @@
     "next-env.d.ts",
     "types/**/*.d.ts",
     ".next/types/**/*.ts",
-    "pathfinder/index.d.ts",
-    "auth.ts"
+    "pathfinder/pkg/*.d.ts"
   ],
   "exclude": ["node_modules"]
 }

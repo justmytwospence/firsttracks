@@ -1,22 +1,21 @@
 "use client";
 
-import type { Bounds } from "@/app/actions/findPath";
 import { AspectChart } from "@/components/aspect-chart";
 import ElevationProfile from "@/components/elevation-chart";
-import FindPathButton from "@/components/find-path-button";
+import FindPathButton, { type Aspect } from "@/components/find-path-button";
 import GradientCDF from "@/components/gradient-cdf-chart";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import LocationSearch from "@/components/location-search";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
 import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
-import type { Aspect } from "@/pathfinder";
+import type { ExplorationNode } from "@/hooks/usePathfinder";
+import type { Bounds } from "@/lib/dem-cache";
 import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
 import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
-import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, MapPin, Mountain, RotateCcw, Route, TrendingUp } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Mountain, RotateCcw, Route, TrendingUp } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -26,6 +25,7 @@ const parseGeoraster = require("georaster");
 const GeoJSONLayer = dynamic(() => import("@/components/leaflet-geojson-layer"), { ssr: false });
 const LeafletPathfindingLayer = dynamic(() => import("@/components/leaflet-pathfinding-layer"), { ssr: false });
 const LeafletRasterLayer = dynamic(() => import("@/components/leaflet-raster-layer"), { ssr: false });
+const LeafletExplorationLayer = dynamic(() => import("@/components/leaflet-exploration-layer").then(mod => ({ default: mod.LeafletExplorationLayer })), { ssr: false });
 
 export default function PathFinderPage() {
   const [waypoints, setWaypoints] = useState<Point[]>([]);
@@ -41,6 +41,7 @@ export default function PathFinderPage() {
   const [isPortrait, setIsPortrait] = useState(false);
   const [chartsDockOpen, setChartsDockOpen] = useState(true);
   const [selectedChart, setSelectedChart] = useState<"elevation" | "gradient">("elevation");
+  const [explorationNodes, setExplorationNodes] = useState<ExplorationNode[]>([]);
 
   // Reference to FindPathButton's click handler for keyboard shortcut
   const findPathRef = useRef<HTMLButtonElement>(null);
@@ -97,7 +98,13 @@ export default function PathFinderPage() {
     setIsLoading(false);
     setPathAspects(null);
     setAspectRaster(null);
+    setExplorationNodes([]);
   }
+
+  // Callback for exploration updates from pathfinder
+  const handleExplorationUpdate = useCallback((nodes: ExplorationNode[]) => {
+    setExplorationNodes((prev) => [...prev, ...nodes]);
+  }, []);
 
   const handleSetPath = useCallback(
     (newPath: LineString | null, invocationCounter: number) => {
@@ -256,6 +263,7 @@ export default function PathFinderPage() {
                 setPath={handleSetPath}
                 setPathAspects={handleSetPathAspects}
                 setAspectRaster={handleSetAspectRaster}
+                onExplorationUpdate={handleExplorationUpdate}
                 className="flex-1"
               />
               <SelectAspectsDialog
@@ -328,53 +336,34 @@ export default function PathFinderPage() {
           </div>
         ) : (
           // Landscape: Original sidebar layout
-          <>
+          <div className="p-4 space-y-4">
             {/* Location Search */}
-            <div className="p-4 border-b">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2 mb-3">
-                <MapPin className="h-3 w-3" />
-                Location
-              </Label>
-              <LocationSearch onLocationSelect={handleLocationSelect} />
-            </div>
+            <LocationSearch onLocationSelect={handleLocationSelect} />
 
-            {/* Route Settings */}
-            <div className="p-4 border-b">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2 mb-3">
-                <Route className="h-3 w-3" />
-                Route Settings
-              </Label>
-              
-              <div className="space-y-4">
-                {/* Max Gradient */}
-                <div className="space-y-2">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm">Max Gradient</span>
-                    <span className="text-sm font-medium">{Math.round(maxGradient * 100)}%</span>
-                  </div>
-                  <Slider
-                    value={[maxGradient]}
-                    onValueChange={(value) => setMaxGradient(value[0])}
-                    min={0.05}
-                    max={2}
-                    step={0.01}
-                    className="w-full"
-                  />
-                </div>
-
-                {/* Excluded Aspects */}
-                <div className="space-y-2">
-                  <span className="text-sm">Excluded Aspects</span>
-                  <SelectAspectsDialog
-                    onSelectDirections={setExcludedAspects}
-                    selectedDirections={excludedAspects}
-                  />
-                </div>
+            {/* Max Gradient */}
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="text-sm">Max Gradient</span>
+                <span className="text-sm font-medium">{Math.round(maxGradient * 100)}%</span>
               </div>
+              <Slider
+                value={[maxGradient]}
+                onValueChange={(value) => setMaxGradient(value[0])}
+                min={0.05}
+                max={2}
+                step={0.01}
+                className="w-full"
+              />
             </div>
+
+            {/* Excluded Aspects */}
+            <SelectAspectsDialog
+              onSelectDirections={setExcludedAspects}
+              selectedDirections={excludedAspects}
+            />
 
             {/* Actions */}
-            <div className="p-4 space-y-2">
+            <div className="space-y-2">
               <FindPathButton
                 ref={findPathRef}
                 waypoints={waypoints}
@@ -386,6 +375,7 @@ export default function PathFinderPage() {
                 setPath={handleSetPath}
                 setPathAspects={handleSetPathAspects}
                 setAspectRaster={handleSetAspectRaster}
+                onExplorationUpdate={handleExplorationUpdate}
                 className="w-full"
               />
               <div className="flex gap-2">
@@ -408,14 +398,13 @@ export default function PathFinderPage() {
 
             {/* Aspect Chart - only show when path exists */}
             {path && pathAspects && (
-              <div className="p-4 border-t">
-                <Label className="text-xs font-medium text-muted-foreground mb-2 block">Aspect Distribution</Label>
+              <div className="pt-4 border-t">
                 <div className="w-full aspect-square max-w-[200px] mx-auto">
                   <AspectChart aspectPoints={pathAspects} />
                 </div>
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
     </>
@@ -469,6 +458,16 @@ export default function PathFinderPage() {
               onBoundsChange={handleBoundsChange}
               mapCenter={mapCenter}
             />
+            {/* Exploration visualization during pathfinding */}
+            {isLoading && explorationNodes.length > 0 && (
+              <LeafletExplorationLayer
+                nodes={explorationNodes}
+                fadeOutDuration={3000}
+                persistDuration={1000}
+                radius={3}
+                color="rgba(59, 130, 246, 0.7)"
+              />
+            )}
             {path && bounds && pathAspects && (
               <GeoJSONLayer
                 polyline={path}

@@ -48,25 +48,28 @@ export default function ElevationChart({
     const container = containerRef.current;
     if (!container) return;
 
-    const resizeObserver = new ResizeObserver(() => {
-      if (chartRef.current) {
-        chartRef.current.resize();
-      }
-    });
-
-    resizeObserver.observe(container);
-
-    // Also handle transition end events
-    const handleTransitionEnd = () => {
+    const resizeChart = () => {
       if (chartRef.current) {
         chartRef.current.resize();
       }
     };
+
+    const resizeObserver = new ResizeObserver(resizeChart);
+    resizeObserver.observe(container);
+
+    // Handle transition end with a small delay to ensure layout has settled
+    const handleTransitionEnd = () => {
+      setTimeout(resizeChart, 50);
+    };
     document.addEventListener('transitionend', handleTransitionEnd);
+
+    // Also listen for window resize
+    window.addEventListener('resize', resizeChart);
 
     return () => {
       resizeObserver.disconnect();
       document.removeEventListener('transitionend', handleTransitionEnd);
+      window.removeEventListener('resize', resizeChart);
     };
   }, []);
 
@@ -227,44 +230,42 @@ export default function ElevationChart({
     },
   };
 
-  // hoverIndex
+  // hoverIndex subscription to sync chart highlighting with map hover
   useEffect(() => {
-    interface HoverIndexState {
-      hoverIndex: number;
-    }
-
-    interface ChartRef {
-      current: ChartJS<"line"> | null;
-    }
-
     const unsubHoverIndex = hoverIndexStore.subscribe((state) => {
-      if (!chartRef.current) return;
-      const chart = chartRef.current as ChartJS<"line">;
+      const chart = chartRef.current;
+      // Ensure chart is fully initialized before interacting
+      if (!chart || !chart.canvas || !chart.ctx) return;
 
-      console.log(state)
-      if (state?.hoverIndex >= 0) {
-        chart.setActiveElements([
-          {
-            datasetIndex: 0,
-            index: state.hoverIndex,
-          },
-        ]);
-        if (chart.tooltip) {
-          chart.tooltip.setActiveElements(
-            [
-              {
-                datasetIndex: 0,
-                index: state.hoverIndex,
-              },
-            ],
-            { x: 0, y: 0 } 
-          );
+      try {
+        if (state?.hoverIndex >= 0) {
+          chart.setActiveElements([
+            {
+              datasetIndex: 0,
+              index: state.hoverIndex,
+            },
+          ]);
+          if (chart.tooltip) {
+            chart.tooltip.setActiveElements(
+              [
+                {
+                  datasetIndex: 0,
+                  index: state.hoverIndex,
+                },
+              ],
+              { x: 0, y: 0 } 
+            );
+          }
+        } else {
+          chart.setActiveElements([]);
+          if (chart.tooltip) {
+            chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+          }
         }
-      } else {
-        chart.setActiveElements([]);
-        if (chart.tooltip) {
-          chart.tooltip.setActiveElements([], { x: 0, y: 0 });
-        }
+        chart.update('none');
+      } catch (e) {
+        // Chart may be in an inconsistent state during transitions
+        console.debug('[ElevationChart] Skipped hover update:', e);
       }
     });
     return unsubHoverIndex;

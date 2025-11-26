@@ -10,19 +10,43 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import type { Aspect } from "@/pathfinder/index.d.ts";
 import { useState } from "react";
 
-const aspects = new Set<Aspect>([
-  "North" as Aspect,
-  "Northeast" as Aspect,
-  "East" as Aspect,
-  "Southeast" as Aspect,
-  "South" as Aspect,
-  "Southwest" as Aspect,
-  "West" as Aspect,
-  "Northwest" as Aspect,
-]);
+// Aspect type matching WASM (lowercase)
+export type Aspect = 
+  | "north"
+  | "northeast"
+  | "east"
+  | "southeast"
+  | "south"
+  | "southwest"
+  | "west"
+  | "northwest"
+  | "flat";
+
+const aspects: Aspect[] = [
+  "north",
+  "northeast",
+  "east",
+  "southeast",
+  "south",
+  "southwest",
+  "west",
+  "northwest",
+];
+
+// Display labels for aspects
+const aspectLabels: Record<Aspect, string> = {
+  north: "North",
+  northeast: "Northeast",
+  east: "East",
+  southeast: "Southeast",
+  south: "South",
+  southwest: "Southwest",
+  west: "West",
+  northwest: "Northwest",
+  flat: "Flat",
+};
 
 interface SelectAspectsDialogProps {
   onSelectDirections: (directions: Aspect[]) => void;
@@ -43,7 +67,7 @@ export function SelectAspectsDialog({
       <DialogTrigger asChild>
         <Button className="w-full">
           {selectedDirections.length
-            ? `Avoiding ${selectedDirections.join(", ")}`
+            ? `Avoiding ${selectedDirections.map(a => aspectLabels[a]).join(", ")}`
             : "Choose aspects to avoid"}
         </Button>
       </DialogTrigger>
@@ -55,7 +79,7 @@ export function SelectAspectsDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-4 gap-2">
-          {Array.from(aspects).map((direction) => (
+          {aspects.map((direction) => (
             <Card
               key={direction}
               className={`p-2 text-center cursor-pointer hover:bg-accent ${
@@ -73,7 +97,7 @@ export function SelectAspectsDialog({
                 setSelected(newSelected);
               }}
             >
-              {direction}
+              {aspectLabels[direction]}
             </Card>
           ))}
         </div>

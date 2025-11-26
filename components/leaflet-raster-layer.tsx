@@ -1,33 +1,33 @@
-import { Aspect } from "@/pathfinder/index.ts";
+import type { Aspect } from "@/components/ui/select-aspects-dialog";
 import GeoRasterLayer from "georaster-layer-for-leaflet";
 import type GeoTIFF from "geotiff";
 import { useEffect, useRef } from "react";
 import { useMap } from "react-leaflet";
 
-function containsAzimuth(aspect: Aspect, azimuth, tolerance = 0.0) {
+function containsAzimuth(aspect: Aspect, azimuth: number, tolerance = 0.0) {
   console.log(`Checking if ${aspect} contains ${azimuth}`);
   switch (aspect) {
-    case Aspect.Northeast:
+    case "northeast":
       console.log(22.5 - tolerance <= azimuth && azimuth <= 67.5 + tolerance);
       return 22.5 - tolerance <= azimuth && azimuth <= 67.5 + tolerance;
-    case Aspect.East:
+    case "east":
       return 67.5 - tolerance <= azimuth && azimuth <= 112.5 + tolerance;
-    case Aspect.Southeast:
+    case "southeast":
       return 112.5 - tolerance <= azimuth && azimuth <= 157.5 + tolerance;
-    case Aspect.South:
+    case "south":
       return 157.5 - tolerance <= azimuth && azimuth <= 202.5 + tolerance;
-    case Aspect.Southwest:
+    case "southwest":
       return 202.5 - tolerance <= azimuth && azimuth <= 247.5 + tolerance;
-    case Aspect.West:
+    case "west":
       return 247.5 - tolerance <= azimuth && azimuth <= 292.5 + tolerance;
-    case Aspect.Northwest:
+    case "northwest":
       return 292.5 - tolerance <= azimuth && azimuth <= 337.5 + tolerance;
-    case Aspect.North:
+    case "north":
       return (
         (0.0 - tolerance <= azimuth && azimuth <= 22.5 + tolerance) ||
         (337.5 - tolerance <= azimuth && azimuth <= 360.0)
       );
-    case Aspect.Flat:
+    case "flat":
       return azimuth === -1.0;
     default:
       return false;

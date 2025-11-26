@@ -15,7 +15,8 @@
     ]
   },
   "scripts": {
-    "build": "npm run build:rs && npx next build",
+    "build": "npm run build:wasm && npx next build",
+    "build:wasm": "cd pathfinder && PATH=$HOME/.cargo/bin:$PATH wasm-pack build --target web --out-dir pkg",
     "build:rs": "curl https://sh.rustup.rs -sSf | sh -s -- -y && (cd pathfinder && npm install && PATH=$HOME/.cargo/bin:$PATH npm run build)",
     "dev": "next dev"
   },
@@ -49,7 +50,6 @@
     "loglevel": "^1.9",
     "lucide-react": "^0.453",
     "next": "^15.1",
-    "pathfinder": "file:pathfinder",
     "react": "^19.0",
     "react-chartjs-2": "^5.3",
     "react-dom": "^19.0",
@@ -62,7 +62,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1",
-    "@napi-rs/cli": "^2",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

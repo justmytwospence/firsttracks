@@ -6,21 +6,22 @@ This is a **Next.js 15 + App Router** application for interactive terrain-aware 
 
 - **State**: Zustand stores with `subscribeWithSelector` middleware
 - **UI**: shadcn/ui + Tailwind CSS, custom Leaflet maps, Chart.js
-- **Rust Integration**: NAPI-RS pathfinding module with DEM processing
+- **Rust Integration**: WebAssembly (wasm-bindgen) pathfinding module running client-side in a Web Worker
 
 ## Key Features
 
 - Click-to-place waypoints on an interactive Leaflet map
-- Find optimal paths using Rust NAPI-RS module with DEM analysis
-- Download DEM data from OpenTopo API
+- Find optimal paths using Rust WASM module with A* algorithm and real-time exploration visualization
+- Download DEM data from OpenTopo API (cached in IndexedDB)
 - Compute azimuths/gradients and display aspect raster overlay
 - Export path as GPX
 - Display elevation profile, gradient CDF, and aspect distribution charts
 
 ## Development Workflows
 
-- **Rust module**: Build with `npm run build` in `/pathfinder`
+- **Rust WASM module**: Build with `npm run build:wasm` (uses wasm-pack)
 - **Dev server**: `npm run dev`
+- **Full build**: `npm run build` (builds WASM then Next.js)
 
 ## Environment Requirements
 ```bash
