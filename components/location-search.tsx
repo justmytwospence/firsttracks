@@ -104,9 +104,12 @@ export default function LocationSearch({
     }
   };
 
+  // Only show popover when there are actual results
+  const showPopover = open && results.length > 0;
+
   return (
     <div className="w-full relative">
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover open={showPopover} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <div className="w-full flex items-center gap-2 px-3 py-2 border rounded-md bg-background text-sm cursor-text">
             <Search className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -126,7 +129,6 @@ export default function LocationSearch({
         >
           <Command>
             <CommandList>
-              <CommandEmpty>No results found.</CommandEmpty>
               <CommandGroup>
                 {results.map((result, index) => (
                   <CommandItem

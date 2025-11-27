@@ -69,6 +69,8 @@ export default function PathFinderPage() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [sheetPage, setSheetPage] = useState(0);
   const sheetScrollRef = useRef<HTMLDivElement>(null);
+  const touchStartY = useRef<number | null>(null);
+  const touchStartTime = useRef<number>(0);
   const explorationStartTimeRef = useRef<number>(0);
   const explorationCountRef = useRef<number>(0);
 
@@ -646,10 +648,10 @@ export default function PathFinderPage() {
       )}
 
       {/* Scrollable content area */}
-      <div className={`flex-1 overflow-hidden ${isPortrait ? "" : "overflow-auto"}`}>
+      <div className={`flex-1 ${isPortrait ? "overflow-hidden" : "overflow-auto"}`}>
         {isPortrait ? (
           // Portrait: Horizontal snap scrolling layout
-          <div className="h-full flex flex-col">
+          <div className="h-full flex flex-col overflow-hidden">
             {/* Horizontal snap scroll container */}
             <div 
               ref={sheetScrollRef}
@@ -660,11 +662,11 @@ export default function PathFinderPage() {
                   setSheetPage(newPage);
                 }
               }}
-              className="flex-1 overflow-x-auto overflow-y-hidden snap-x snap-mandatory flex scrollbar-hide"
-              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+              className="flex-1 overflow-x-auto overflow-y-hidden snap-x snap-mandatory flex scrollbar-hide touch-pan-x"
+              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', overflowY: 'hidden' }}
             >
               {/* Page 1: Controls */}
-              <div className="snap-center shrink-0 w-full h-full p-4 space-y-3 overflow-y-auto">
+              <div className="snap-center shrink-0 w-full min-h-full p-4 space-y-3">
                 {/* Top row: Search + Actions */}
                 <div className="flex gap-2">
                   <div className="flex-1 min-w-0">
@@ -916,7 +918,7 @@ export default function PathFinderPage() {
   );
 
   return (
-    <div className={`h-screen w-screen flex ${isPortrait ? "flex-col" : "flex-row"}`}>
+    <div className={`h-screen w-screen flex overflow-hidden ${isPortrait ? "flex-col" : "flex-row"}`}>
       {/* Panel - Sidebar (landscape) or Bottom Panel (portrait) */}
       {!isPortrait ? (
         // Landscape: Left sidebar
@@ -1117,18 +1119,44 @@ export default function PathFinderPage() {
       {/* Portrait: Bottom panel */}
       {isPortrait ? (
         <div className="w-full flex flex-col">
-          {/* Drag handle - always visible, tappable to toggle panel */}
+          {/* Drag handle - always visible, tappable to toggle panel, swipeable */}
           <button
             type="button"
             onClick={() => setPanelOpen(!panelOpen)}
-            className="flex justify-center py-3 w-full bg-background border-t rounded-t-xl shadow-[0_-4px_20px_rgba(0,0,0,0.1)] hover:bg-muted/30 transition-colors cursor-pointer"
+            onTouchStart={(e) => {
+              touchStartY.current = e.touches[0].clientY;
+              touchStartTime.current = Date.now();
+            }}
+            onTouchEnd={(e) => {
+              if (touchStartY.current === null) return;
+              const touchEndY = e.changedTouches[0].clientY;
+              const deltaY = touchStartY.current - touchEndY;
+              const deltaTime = Date.now() - touchStartTime.current;
+              const velocity = Math.abs(deltaY) / deltaTime;
+              
+              // Require minimum swipe distance (30px) or high velocity (0.3px/ms)
+              const isSwipe = Math.abs(deltaY) > 30 || velocity > 0.3;
+              
+              if (isSwipe) {
+                e.preventDefault();
+                if (deltaY > 0) {
+                  // Swiped up - expand
+                  setPanelOpen(true);
+                } else {
+                  // Swiped down - collapse
+                  setPanelOpen(false);
+                }
+              }
+              touchStartY.current = null;
+            }}
+            className="flex justify-center py-3 w-full bg-background border-t rounded-t-xl shadow-[0_-4px_20px_rgba(0,0,0,0.1)] hover:bg-muted/30 transition-colors cursor-pointer touch-none"
           >
             <div className="w-10 h-1 bg-muted-foreground/30 rounded-full" />
           </button>
           {/* Collapsible content */}
           <div
             className={`w-full bg-background flex flex-col transition-all duration-300 ${
-              panelOpen ? "h-[30vh]" : "h-0"
+              panelOpen ? "h-[220px]" : "h-0"
             } overflow-hidden`}
           >
             {panelContent}
