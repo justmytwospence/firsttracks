@@ -23,7 +23,8 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "pathfinder": ["./pathfinder/pkg/pathfinder"]
     }
   },
   "include": [
