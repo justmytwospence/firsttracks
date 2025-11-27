@@ -28,18 +28,18 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
     }, {} as Record<string, number>);
 
     const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    const aspectMap = {
-      N: 'North',
-      NE: 'Northeast',
-      E: 'East',
-      SE: 'Southeast',
-      S: 'South',
-      SW: 'Southwest',
-      W: 'West',
-      NW: 'Northwest'
+    const aspectMap: Record<string, Aspect> = {
+      N: 'north',
+      NE: 'northeast',
+      E: 'east',
+      SE: 'southeast',
+      S: 'south',
+      SW: 'southwest',
+      W: 'west',
+      NW: 'northwest'
     };
 
-    const counts = directions.map(dir => aspectCounts[aspectMap[dir as keyof typeof aspectMap]] || 0);
+    const counts = directions.map(dir => aspectCounts[aspectMap[dir]] || 0);
     const total = counts.reduce((sum, count) => sum + count, 0);
 
     return {
@@ -107,17 +107,17 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
       if (elements?.[0]) {
         const index = elements[0].index;
         const direction = chartData.labels[index];
-        const aspectMap: Record<string, string> = {
-          'N': 'North',
-          'NE': 'Northeast',
-          'E': 'East',
-          'SE': 'Southeast',
-          'S': 'South',
-          'SW': 'Southwest',
-          'W': 'West',
-          'NW': 'Northwest'
+        const aspectMap: Record<string, Aspect> = {
+          'N': 'north',
+          'NE': 'northeast',
+          'E': 'east',
+          'SE': 'southeast',
+          'S': 'south',
+          'SW': 'southwest',
+          'W': 'west',
+          'NW': 'northwest'
         };
-        const hoveredAspect = aspectMap[direction] as Aspect;
+        const hoveredAspect = aspectMap[direction];
         setHoveredAspect(hoveredAspect);
       } else {
         setHoveredAspect(null);
@@ -128,25 +128,23 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
         const index = elements[0].index;
         const direction = chartData.labels[index];
         const aspectMap: Record<string, Aspect> = {
-          'N': 'North',
-          'NE': 'Northeast',
-          'E': 'East',
-          'SE': 'Southeast',
-          'S': 'South',
-          'SW': 'Southwest',
-          'W': 'West',
-          'NW': 'Northwest'
+          'N': 'north',
+          'NE': 'northeast',
+          'E': 'east',
+          'SE': 'southeast',
+          'S': 'south',
+          'SW': 'southwest',
+          'W': 'west',
+          'NW': 'northwest'
         };
-        const clickedAspectDisplay = aspectMap[direction];
-        // Convert to lowercase for the excluded aspects list (matches WASM type)
-        const clickedAspectLower = clickedAspectDisplay.toLowerCase() as Aspect;
+        const clickedAspect = aspectMap[direction];
         
         // Toggle the aspect in excluded list
         if (onAspectClick) {
-          onAspectClick(clickedAspectLower);
+          onAspectClick(clickedAspect);
         }
         
-        setHoveredAspect(clickedAspectDisplay);
+        setHoveredAspect(clickedAspect);
         setIsAspectLocked(true);
       }
     }

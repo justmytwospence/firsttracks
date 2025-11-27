@@ -39,7 +39,7 @@ ChartJS.register(
 const CHART_COLORS = ["#3b82f6", "#64748b", "#f43f5e"];
 
 export default function GradientCdfChart({ mappables }: { mappables: Mappable[] }) {
-  const chartRef = useRef<ChartJS>(null);
+  const chartRef = useRef<ChartJS<"bar" | "line">>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { setHoveredGradient } = gradientStore();
   const [isGradientLocked, setIsGradientLocked] = useState(false);
@@ -243,9 +243,9 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
         filter: (item) => !item.dataset.label?.includes('(histogram)'),
         callbacks: {
           title: (items) =>
-            `Gradient: ${(items[0].parsed.x * 100).toFixed(1)}%`,
+            items[0]?.parsed?.x != null ? `Gradient: ${(items[0].parsed.x * 100).toFixed(1)}%` : '',
           label: (item) =>
-            `${item.dataset.label}: ${(item.parsed.y * 100).toFixed(1)}%`,
+            `${item.dataset.label}: ${((item.parsed.y ?? 0) * 100).toFixed(1)}%`,
         },
       },
     },

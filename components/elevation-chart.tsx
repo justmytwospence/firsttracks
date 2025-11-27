@@ -136,15 +136,17 @@ export default function ElevationChart({
             }
             
             let isHighlighted = false;
-            if (gradientHighlightMode === 'histogram') {
-              // Histogram mode: highlight only points within the 1% bin
-              const binSize = 0.01;
-              const binMin = hoveredGradient - binSize / 2;
-              const binMax = hoveredGradient + binSize / 2;
-              isHighlighted = gradientValue >= binMin && gradientValue < binMax;
-            } else {
-              // CDF mode: highlight points >= threshold
-              isHighlighted = gradientValue >= hoveredGradient;
+            if (gradientValue !== null) {
+              if (gradientHighlightMode === 'histogram') {
+                // Histogram mode: highlight only points within the 1% bin
+                const binSize = 0.01;
+                const binMin = hoveredGradient - binSize / 2;
+                const binMax = hoveredGradient + binSize / 2;
+                isHighlighted = gradientValue >= binMin && gradientValue < binMax;
+              } else {
+                // CDF mode: highlight points >= threshold
+                isHighlighted = gradientValue >= hoveredGradient;
+              }
             }
             
             return isHighlighted
@@ -241,10 +243,10 @@ export default function ElevationChart({
             const label = context.dataset.label || "";
             if (label === "Elevation (ft)") {
               return `Elevation: ${Math.round(
-                context.parsed.y
+                context.parsed.y ?? 0
               ).toLocaleString()} ft`;
             }if (label === "Gradient (%)") {
-              return `Gradient: ${(context.parsed.y * 100).toFixed(1)}%`;
+              return `Gradient: ${((context.parsed.y ?? 0) * 100).toFixed(1)}%`;
             }
             return label;
           },
