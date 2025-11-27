@@ -560,14 +560,14 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
     return (
       <Button
         ref={ref}
-        className={className || "flex-1"}
+        className={`${className || "flex-1"} overflow-hidden`}
         onClick={handleClick}
         disabled={waypoints.length < 2 || !workerReady}
       >
         {isLoading ? (
           <>
-            Find Path
-            <Loader className="animate-spin h-4 w-4 ml-2" />
+            <span className="truncate">Find Path</span>
+            <Loader className="animate-spin h-4 w-4 ml-2 shrink-0" />
           </>
         ) : (
           "Find Path"

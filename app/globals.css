@@ -130,3 +130,12 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Hide scrollbar for horizontal snap scrolling */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}

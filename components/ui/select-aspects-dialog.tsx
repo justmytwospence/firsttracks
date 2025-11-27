@@ -51,11 +51,13 @@ const aspectLabels: Record<Aspect, string> = {
 interface SelectAspectsDialogProps {
   onSelectDirections: (directions: Aspect[]) => void;
   selectedDirections: Aspect[];
+  className?: string;
 }
 
 export function SelectAspectsDialog({
   onSelectDirections,
   selectedDirections,
+  className,
 }: SelectAspectsDialogProps) {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<Set<Aspect>>(
@@ -70,10 +72,8 @@ export function SelectAspectsDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="w-full">
-          {selectedDirections.length
-            ? `Avoiding ${selectedDirections.map(a => aspectLabels[a]).join(", ")}`
-            : "Choose aspects to avoid"}
+        <Button className={className ?? "w-full"}>
+          Avoid Aspects
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-[500px]">

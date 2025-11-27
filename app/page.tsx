@@ -67,6 +67,8 @@ export default function PathFinderPage() {
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFilename, setExportFilename] = useState("path");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [sheetPage, setSheetPage] = useState(0);
+  const sheetScrollRef = useRef<HTMLDivElement>(null);
   const explorationStartTimeRef = useRef<number>(0);
   const explorationCountRef = useRef<number>(0);
 
@@ -194,18 +196,18 @@ export default function PathFinderPage() {
   useEffect(() => {
     if (path && aspectRaster && !pathAspects) {
       // Helper to convert azimuth value (0-360) to aspect string
-      // Must match the capitalized format expected by AspectChart
+      // Must match the lowercase format expected by AspectChart
       const azimuthToAspect = (azimuth: number): string => {
-        if (azimuth === -1 || azimuth === 255) return "Flat"; // NoData values
-        if (azimuth < 22.5) return "North";
-        if (azimuth < 67.5) return "Northeast";
-        if (azimuth < 112.5) return "East";
-        if (azimuth < 157.5) return "Southeast";
-        if (azimuth < 202.5) return "South";
-        if (azimuth < 247.5) return "Southwest";
-        if (azimuth < 292.5) return "West";
-        if (azimuth < 337.5) return "Northwest";
-        return "North";
+        if (azimuth === -1 || azimuth === 255) return "flat"; // NoData values
+        if (azimuth < 22.5) return "north";
+        if (azimuth < 67.5) return "northeast";
+        if (azimuth < 112.5) return "east";
+        if (azimuth < 157.5) return "southeast";
+        if (azimuth < 202.5) return "south";
+        if (azimuth < 247.5) return "southwest";
+        if (azimuth < 292.5) return "west";
+        if (azimuth < 337.5) return "northwest";
+        return "north";
       };
 
       // Look up aspect for each coordinate from the raster
@@ -220,7 +222,7 @@ export default function PathFinderPage() {
         const row = Math.floor((ymax - lat) / Math.abs(pixelHeight));
         
         // Get azimuth value from raster (with bounds checking)
-        let aspect = "Flat";
+        let aspect = "flat";
         if (row >= 0 && row < azimuthValues.length && col >= 0 && col < azimuthValues[0].length) {
           const azimuthValue = azimuthValues[row][col];
           aspect = azimuthToAspect(azimuthValue);
@@ -644,158 +646,163 @@ export default function PathFinderPage() {
       )}
 
       {/* Scrollable content area */}
-      <div className={`flex-1 overflow-auto ${isPortrait ? "p-3" : ""}`}>
+      <div className={`flex-1 overflow-hidden ${isPortrait ? "" : "overflow-auto"}`}>
         {isPortrait ? (
-          // Portrait: Compact mobile layout
-          <div className="space-y-2">
-            {/* Top row: Search + Actions */}
-            <div className="flex gap-2">
-              <div className="flex-1 min-w-0">
-                <LocationSearch onLocationSelect={handleLocationSelect} />
+          // Portrait: Horizontal snap scrolling layout
+          <div className="h-full flex flex-col">
+            {/* Horizontal snap scroll container */}
+            <div 
+              ref={sheetScrollRef}
+              onScroll={() => {
+                if (sheetScrollRef.current) {
+                  const pageWidth = sheetScrollRef.current.offsetWidth;
+                  const newPage = Math.round(sheetScrollRef.current.scrollLeft / pageWidth);
+                  setSheetPage(newPage);
+                }
+              }}
+              className="flex-1 overflow-x-auto overflow-y-hidden snap-x snap-mandatory flex scrollbar-hide"
+              style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+            >
+              {/* Page 1: Controls */}
+              <div className="snap-center shrink-0 w-full h-full p-4 space-y-3 overflow-y-auto">
+                {/* Top row: Search + Actions */}
+                <div className="flex gap-2">
+                  <div className="flex-1 min-w-0">
+                    <LocationSearch onLocationSelect={handleLocationSelect} />
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    onClick={handleUndo} 
+                    size="icon" 
+                    className="shrink-0 h-10 w-10"
+                    disabled={waypoints.length === 0}
+                  >
+                    <Undo2 className="h-4 w-4" />
+                  </Button>
+                  <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-10 w-10" disabled={waypoints.length === 0}>
+                    <RotateCcw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0 h-10 w-10"
+                    onClick={() => gpxInputRef.current?.click()}
+                  >
+                    <Upload className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="shrink-0 h-10 w-10"
+                    disabled={path == null}
+                    onClick={() => setExportDialogOpen(true)}
+                  >
+                    <Download className="h-4 w-4" />
+                  </Button>
+                </div>
+
+                {/* Gradient slider - full row */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-sm text-muted-foreground">Max Gradient</span>
+                    <span className="text-sm font-medium">{Math.round(maxGradient * 100)}%</span>
+                  </div>
+                  <Slider
+                    value={[maxGradient]}
+                    onValueChange={(value) => setMaxGradient(value[0])}
+                    min={0.05}
+                    max={2}
+                    step={0.01}
+                    className="w-full"
+                  />
+                </div>
+
+                {/* Frontier visualization toggle */}
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Show Frontier</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowFrontier(!showFrontier)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
+                  >
+                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${showFrontier ? 'translate-x-6' : 'translate-x-1'}`} />
+                  </button>
+                </div>
+
+                {/* Aspects + Find Path buttons (equal width, Find Path on right) */}
+                <div className="flex gap-2 pt-1">
+                  <SelectAspectsDialog
+                    onSelectDirections={setExcludedAspects}
+                    selectedDirections={excludedAspects}
+                    className="flex-1"
+                  />
+                  <FindPathButton
+                    ref={findPathRef}
+                    waypoints={waypoints}
+                    bounds={cachedBounds}
+                    maxGradient={maxGradient}
+                    excludedAspects={excludedAspects}
+                    isLoading={isLoading}
+                    setIsLoading={setIsLoading}
+                    setPath={handleSetPath}
+                    setPathAspects={handleSetPathAspects}
+                    setAspectRaster={handleSetAspectRaster}
+                    onExplorationUpdate={handleExplorationUpdate}
+                    onExplorationComplete={handleExplorationComplete}
+                    onStartPathfinding={handleStartPathfinding}
+                    onlyLastSegment={path !== null && !forceFullRepathRef.current}
+                    preloadBounds={cachedBounds}
+                    className="flex-1"
+                  />
+                </div>
               </div>
-              <Button 
-                variant="outline" 
-                onClick={handleUndo} 
-                size="icon" 
-                className="shrink-0 h-9 w-9"
-                disabled={waypoints.length === 0}
-              >
-                <Undo2 className="h-4 w-4" />
-              </Button>
-              <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-9 w-9" disabled={waypoints.length === 0}>
-                <RotateCcw className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="shrink-0 h-9 w-9"
-                onClick={() => gpxInputRef.current?.click()}
-              >
-                <Upload className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="shrink-0 h-9 w-9"
-                disabled={path == null}
-                onClick={() => setExportDialogOpen(true)}
-              >
-                <Download className="h-4 w-4" />
-              </Button>
-            </div>
 
-            {/* Gradient slider - full row */}
-            <div className="space-y-1">
-              <div className="flex justify-between items-center">
-                <span className="text-xs text-muted-foreground">Max Gradient</span>
-                <span className="text-xs font-medium">{Math.round(maxGradient * 100)}%</span>
-              </div>
-              <Slider
-                value={[maxGradient]}
-                onValueChange={(value) => setMaxGradient(value[0])}
-                min={0.05}
-                max={2}
-                step={0.01}
-                className="w-full"
-              />
-            </div>
+              {/* Chart pages - only when path exists */}
+              {path && (
+                <>
+                  {/* Page 2: Elevation chart */}
+                  <div className="snap-center shrink-0 w-full h-full p-3">
+                    <ElevationProfile polyline={path} />
+                  </div>
 
-            {/* Frontier visualization toggle */}
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">Show Frontier</span>
-              <button
-                type="button"
-                onClick={() => setShowFrontier(!showFrontier)}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
-              >
-                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${showFrontier ? 'translate-x-5' : 'translate-x-1'}`} />
-              </button>
-            </div>
+                  {/* Page 3: Gradient chart */}
+                  <div className="snap-center shrink-0 w-full h-full p-3">
+                    <GradientCDF mappables={[{ polyline: path, name: "Path", id: "path" }]} />
+                  </div>
 
-            {/* Find Path + Aspects buttons */}
-            <div className="flex gap-2">
-              <FindPathButton
-                ref={findPathRef}
-                waypoints={waypoints}
-                bounds={cachedBounds}
-                maxGradient={maxGradient}
-                excludedAspects={excludedAspects}
-                isLoading={isLoading}
-                setIsLoading={setIsLoading}
-                setPath={handleSetPath}
-                setPathAspects={handleSetPathAspects}
-                setAspectRaster={handleSetAspectRaster}
-                onExplorationUpdate={handleExplorationUpdate}
-                onExplorationComplete={handleExplorationComplete}
-                onStartPathfinding={handleStartPathfinding}
-                onlyLastSegment={path !== null && !forceFullRepathRef.current}
-                preloadBounds={cachedBounds}
-                className="flex-1"
-              />
-              <SelectAspectsDialog
-                onSelectDirections={setExcludedAspects}
-                selectedDirections={excludedAspects}
-              />
-            </div>
-
-            {/* Charts dock for portrait - collapsible above controls */}
-            {path && (
-              <div className="border rounded-lg overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setChartsDockOpen(!chartsDockOpen)}
-                  className="w-full px-3 py-2 flex items-center justify-between bg-muted/30 hover:bg-muted/50 transition-colors"
-                >
-                  <span className="text-xs font-medium flex items-center gap-2">
-                    <BarChart3 className="h-3 w-3" />
-                    Analysis
-                  </span>
-                  {chartsDockOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                </button>
-                {chartsDockOpen && (
-                  <div className="p-2 space-y-2">
-                    {/* Chart selector */}
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedChart("elevation")}
-                        className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                          selectedChart === "elevation"
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted hover:bg-muted/80"
-                        }`}
-                      >
-                        Elevation
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSelectedChart("gradient")}
-                        className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
-                          selectedChart === "gradient"
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted hover:bg-muted/80"
-                        }`}
-                      >
-                        Gradient
-                      </button>
-                    </div>
-                    {/* Chart content */}
-                    <div className="h-[100px]">
-                      {selectedChart === "elevation" && <ElevationProfile polyline={path} />}
-                      {selectedChart === "gradient" && (
-                        <GradientCDF mappables={[{ polyline: path, name: "Path", id: "path" }]} />
-                      )}
-                    </div>
-                    {/* Aspect chart - full width square */}
-                    {pathAspects && (
-                      <div className="w-full aspect-square">
+                  {/* Page 4: Aspect chart */}
+                  {pathAspects && (
+                    <div className="snap-center shrink-0 w-full h-full p-3 flex items-center justify-center">
+                      <div className="h-full max-h-full aspect-square">
                         <AspectChart aspectPoints={pathAspects} />
                       </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Page indicators - clickable dots */}
+            <div className="flex justify-center gap-2 py-2 shrink-0">
+              {(() => {
+                const pageCount = path ? (pathAspects ? 4 : 3) : 1;
+                return Array.from({ length: pageCount }).map((_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => {
+                      if (sheetScrollRef.current) {
+                        const pageWidth = sheetScrollRef.current.offsetWidth;
+                        sheetScrollRef.current.scrollTo({ left: i * pageWidth, behavior: 'smooth' });
+                      }
+                    }}
+                    className={`w-2 h-2 rounded-full transition-colors ${
+                      sheetPage === i ? 'bg-primary' : 'bg-muted-foreground/30'
+                    }`}
+                  />
+                ));
+              })()}
+            </div>
           </div>
         ) : (
           // Landscape: Original sidebar layout
@@ -922,30 +929,20 @@ export default function PathFinderPage() {
         </div>
       ) : null}
 
-      {/* Toggle Button */}
-      <button
-        type="button"
-        onClick={() => setPanelOpen(!panelOpen)}
-        className={`absolute z-[1000] bg-background border rounded-full shadow-lg hover:bg-accent transition-all duration-300 ${
-          isPortrait
-            ? "left-1/2 -translate-x-1/2 p-3"
-            : "p-2"
-        }`}
-        style={
-          isPortrait
-            ? { bottom: panelOpen ? "calc(min(200px, 35vh) + 0.75rem)" : "0.75rem" }
-            : { 
-                left: panelOpen ? "calc(20rem + 0.75rem)" : "0.75rem",
-                bottom: path && chartsDockOpen ? "calc(280px + 0.75rem)" : "0.75rem"
-              }
-        }
-      >
-        {isPortrait ? (
-          panelOpen ? <ChevronDown className="h-5 w-5" /> : <ChevronUp className="h-5 w-5" />
-        ) : (
-          panelOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />
-        )}
-      </button>
+      {/* Toggle Button - only show in landscape */}
+      {!isPortrait && (
+        <button
+          type="button"
+          onClick={() => setPanelOpen(!panelOpen)}
+          className="absolute z-[1000] bg-background border rounded-full shadow-lg hover:bg-accent transition-all duration-300 p-2"
+          style={{ 
+            left: panelOpen ? "calc(20rem + 0.75rem)" : "0.75rem",
+            bottom: path && chartsDockOpen ? "calc(280px + 0.75rem)" : "0.75rem"
+          }}
+        >
+          {panelOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </button>
+      )}
 
       {/* Map */}
       <div id="main-content" className="flex-1 relative flex flex-col min-h-0 min-w-0">
@@ -1119,16 +1116,23 @@ export default function PathFinderPage() {
 
       {/* Portrait: Bottom panel */}
       {isPortrait ? (
-        <div
-          className={`w-full bg-background border-t rounded-t-xl shadow-[0_-4px_20px_rgba(0,0,0,0.1)] flex flex-col transition-all duration-300 ${
-            panelOpen ? "h-[min(200px,35vh)]" : "h-0"
-          } overflow-hidden`}
-        >
-          {/* Drag handle indicator */}
-          <div className="flex justify-center py-2">
+        <div className="w-full flex flex-col">
+          {/* Drag handle - always visible, tappable to toggle panel */}
+          <button
+            type="button"
+            onClick={() => setPanelOpen(!panelOpen)}
+            className="flex justify-center py-3 w-full bg-background border-t rounded-t-xl shadow-[0_-4px_20px_rgba(0,0,0,0.1)] hover:bg-muted/30 transition-colors cursor-pointer"
+          >
             <div className="w-10 h-1 bg-muted-foreground/30 rounded-full" />
+          </button>
+          {/* Collapsible content */}
+          <div
+            className={`w-full bg-background flex flex-col transition-all duration-300 ${
+              panelOpen ? "h-[30vh]" : "h-0"
+            } overflow-hidden`}
+          >
+            {panelContent}
           </div>
-          {panelContent}
         </div>
       ) : null}
 

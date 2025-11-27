@@ -247,7 +247,7 @@ pub fn find_path_rs(
           ]))),
           id: None,
           properties: Some(serde_json::json!({
-            "aspect": format!("{:?}", aspect),
+            "aspect": serde_json::to_value(&aspect).unwrap(),
             "azimuth": azimuth.to_string(),
           }).as_object().unwrap().clone()),
           foreign_members: None,
