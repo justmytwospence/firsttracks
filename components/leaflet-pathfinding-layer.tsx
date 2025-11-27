@@ -1,4 +1,4 @@
-import type { Bounds } from "@/app/actions/findPath";
+import type { Bounds } from "@/lib/dem-cache";
 import { baseLogger } from "@/lib/logger";
 import type { Point } from "geojson";
 import L from "leaflet";
