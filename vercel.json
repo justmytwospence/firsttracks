@@ -1,4 +1,4 @@
 {
-  "installCommand": "npm install -g npm@10 && npm install && curl https://sh.rustup.rs -sSf | sh -s -- -y && curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh",
+  "installCommand": "npm install -g npm@10 && npm install && curl https://sh.rustup.rs -sSf | sh -s -- -y && PATH=$HOME/.cargo/bin:$PATH cargo install wasm-pack",
   "buildCommand": "PATH=$HOME/.cargo/bin:$PATH npm run build"
 }
