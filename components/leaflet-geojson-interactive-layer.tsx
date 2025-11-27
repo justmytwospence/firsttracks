@@ -1,5 +1,4 @@
 import { computeGradient } from "@/lib/geo/geo";
-import type { Aspect } from "pathfinder";
 import type { HoverIndexStore } from "@/store";
 import {
   aspectStore,
@@ -9,6 +8,7 @@ import {
 } from "@/store";
 import type { Feature, FeatureCollection, LineString, Point } from "geojson";
 import L from "leaflet";
+import type { Aspect } from "pathfinder";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useRef } from "react";
 import { useMap } from "react-leaflet";

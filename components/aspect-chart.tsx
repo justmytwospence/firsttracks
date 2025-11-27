@@ -1,7 +1,7 @@
-import type { Aspect } from "pathfinder";
 import { aspectStore } from '@/store';
 import { type ActiveElement, ArcElement, type ChartEvent, Chart as ChartJS, Legend, RadialLinearScale, Tooltip } from 'chart.js';
 import type { FeatureCollection } from 'geojson';
+import type { Aspect } from "pathfinder";
 import { useState } from 'react';
 import { useMemo } from 'react';
 import { PolarArea } from 'react-chartjs-2';
