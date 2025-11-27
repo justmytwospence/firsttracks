@@ -32,9 +32,9 @@ import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
 import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, HelpCircle, Mountain, RotateCcw, Route, TrendingUp, Undo2, Upload, X } from "lucide-react";
-import { SiBuymeacoffee, SiGithub } from "react-icons/si";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SiBuymeacoffee, SiGithub } from "react-icons/si";
 
 const parseGeoraster = require("georaster");
 
@@ -58,7 +58,7 @@ export default function PathFinderPage() {
   const [mapFitBounds, setMapFitBounds] = useState<Bounds | undefined>();
   const [pathAspects, setPathAspects] = useState<FeatureCollection | null>(null);
   const [aspectRaster, setAspectRaster] = useState<GeoRaster | null>(null);
-  const [maxGradient, setMaxGradient] = useState<number>(0.25);
+  const [maxGradient, setMaxGradient] = useState<number>(0.30);
   const [panelOpen, setPanelOpen] = useState(true);
   const [isPortrait, setIsPortrait] = useState(false);
   const [chartsDockOpen, setChartsDockOpen] = useState(true);
