@@ -317,6 +317,41 @@ export function boundsContain(outer: Bounds, inner: Bounds): boolean {
 
 /**
  * Find a cached tile that contains the requested bounds
+ * Returns the bounds of the cached tile if found, null otherwise
+ * Useful for showing the cached region on the map
+ */
+export async function findCachedBoundsContaining(bounds: Bounds): Promise<Bounds | null> {
+  try {
+    const db = await openDB();
+    const normalizedBounds = normalizeBounds(bounds);
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.openCursor();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const tile = cursor.value as CachedTile;
+          if (boundsContain(tile.bounds, normalizedBounds)) {
+            resolve(tile.bounds);
+            return;
+          }
+          cursor.continue();
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find a cached tile that contains the requested bounds
  * Returns the cached data if found, null otherwise
  */
 async function findContainingCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
@@ -534,6 +569,40 @@ export async function findContainingCachedAzimuths(bounds: Bounds): Promise<Azim
               azimuths: new Uint8Array(cached.azimuths),
               gradients: new Uint8Array(cached.gradients),
             });
+            return;
+          }
+          cursor.continue();
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find cached azimuths that contain the requested bounds
+ * Returns the bounds of the cached azimuths if found, null otherwise
+ */
+export async function findCachedAzimuthBoundsContaining(bounds: Bounds): Promise<Bounds | null> {
+  try {
+    const db = await openDB();
+    const normalizedBounds = normalizeBounds(bounds);
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
+      const request = store.openCursor();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const cached = cursor.value as CachedAzimuths;
+          if (boundsContain(cached.bounds, normalizedBounds)) {
+            resolve(cached.bounds);
             return;
           }
           cursor.continue();

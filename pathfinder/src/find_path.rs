@@ -1,4 +1,4 @@
-use std::{cell::RefCell, f64::consts::E, io::Cursor, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, f64::consts::E, io::Cursor, rc::Rc};
 
 use geojson::{FeatureCollection, GeoJson, Geometry, Value};
 use georaster::{geotiff::GeoTiffReader, Coordinate};
@@ -53,45 +53,136 @@ fn cost_fn(distance: f64, gradient: f64) -> i32 {
 }
 
 /// Exploration tracker using interior mutability for callback batching
+/// Tracks the true expanding frontier (boundary of explored region)
 struct ExplorationTracker {
   callback: Option<Function>,
-  explored_nodes: Vec<(usize, usize)>,  // pixel coordinates
-  batch_size: usize,
+  explored: HashSet<(usize, usize)>,  // All visited nodes
+  frontier: HashSet<(usize, usize)>,   // Current boundary nodes (explored with unexplored neighbors)
+  batch_counter: usize,
+  total_explored: usize,  // Running count for adaptive batch sizing
+  base_batch_size: usize,
   pixel_scale: (f64, f64),  // (dx, dy) for pixel to coord conversion
   origin: (f64, f64),       // (x, y) origin
+  width: usize,
+  height: usize,
 }
 
 impl ExplorationTracker {
-  fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, batch_size: usize) -> Self {
+  fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, batch_size: usize, width: usize, height: usize) -> Self {
     // Get transform parameters from geotiff
     let origin = geotiff.origin().unwrap_or([0.0, 0.0]);
     let pixel_scale_arr = geotiff.pixel_size().unwrap_or([1.0/10800.0, -1.0/10800.0]);
     
     Self {
       callback,
-      explored_nodes: Vec::with_capacity(batch_size),
-      batch_size,
+      explored: HashSet::new(),
+      frontier: HashSet::new(),
+      batch_counter: 0,
+      total_explored: 0,
+      base_batch_size: batch_size,
       pixel_scale: (pixel_scale_arr[0], pixel_scale_arr[1]),
       origin: (origin[0], origin[1]),
+      width,
+      height,
     }
   }
 
+  /// Compute adaptive batch size based on total explored nodes
+  /// Starts slow for visual feedback, ramps up exponentially
+  fn current_batch_size(&self) -> usize {
+    // Use log2 scaling: batch doubles roughly every 10x explored nodes
+    // 0-500: base (500)
+    // 500-5k: 2x (1000)  
+    // 5k-50k: 4x (2000)
+    // 50k-500k: 8x (4000)
+    // 500k+: 16x (8000)
+    let multiplier = if self.total_explored < 500 {
+      1
+    } else {
+      // log10(total) gives us roughly: 500->2.7, 5k->3.7, 50k->4.7, 500k->5.7
+      // Subtract 2.5 and use as power of 2
+      let log_val = (self.total_explored as f64).log10() - 2.5;
+      let power = log_val.max(0.0).min(4.0); // Cap at 16x
+      (2.0_f64.powf(power)) as usize
+    };
+    
+    self.base_batch_size * multiplier
+  }
+
+  /// Called when a node is visited - updates explored set and frontier
   fn add_node(&mut self, x: usize, y: usize) {
-    if self.callback.is_some() {
-      self.explored_nodes.push((x, y));
-      
-      if self.explored_nodes.len() >= self.batch_size {
-        self.flush();
+    if self.callback.is_none() {
+      return;
+    }
+
+    // Add to explored set
+    self.explored.insert((x, y));
+    self.total_explored += 1;
+    
+    // Add to frontier (will be refined when we check its neighbors)
+    self.frontier.insert((x, y));
+    
+    // Check if this node should remain on frontier (has any unexplored neighbors)
+    // Also remove neighbors from frontier if they're now fully surrounded
+    self.update_frontier_around(x, y);
+    
+    self.batch_counter += 1;
+    if self.batch_counter >= self.current_batch_size() {
+      self.flush();
+      self.batch_counter = 0;
+    }
+  }
+
+  /// Update frontier status for a node and its neighbors
+  fn update_frontier_around(&mut self, x: usize, y: usize) {
+    const DIRECTIONS: [(isize, isize); 8] = [
+      (0, 1), (1, 0), (0, -1), (-1, 0),
+      (1, 1), (1, -1), (-1, -1), (-1, 1),
+    ];
+
+    // Check if current node should be on frontier
+    let mut has_unexplored_neighbor = false;
+    for &(dx, dy) in DIRECTIONS.iter() {
+      let nx = (x as isize + dx) as usize;
+      let ny = (y as isize + dy) as usize;
+      if nx < self.width && ny < self.height && !self.explored.contains(&(nx, ny)) {
+        has_unexplored_neighbor = true;
+        break;
+      }
+    }
+    
+    if !has_unexplored_neighbor {
+      self.frontier.remove(&(x, y));
+    }
+    
+    // Check neighbors that were on frontier - they might now be interior
+    for &(dx, dy) in DIRECTIONS.iter() {
+      let nx = (x as isize + dx) as usize;
+      let ny = (y as isize + dy) as usize;
+      if nx < self.width && ny < self.height && self.frontier.contains(&(nx, ny)) {
+        // Check if this neighbor still has unexplored neighbors
+        let mut still_frontier = false;
+        for &(ddx, ddy) in DIRECTIONS.iter() {
+          let nnx = (nx as isize + ddx) as usize;
+          let nny = (ny as isize + ddy) as usize;
+          if nnx < self.width && nny < self.height && !self.explored.contains(&(nnx, nny)) {
+            still_frontier = true;
+            break;
+          }
+        }
+        if !still_frontier {
+          self.frontier.remove(&(nx, ny));
+        }
       }
     }
   }
 
   fn flush(&mut self) {
     if let Some(ref callback) = self.callback {
-      if !self.explored_nodes.is_empty() {
-        // Convert to JS array of [lon, lat] pairs
+      if !self.frontier.is_empty() {
+        // Convert frontier to JS array of [lon, lat] pairs
         let arr = js_sys::Array::new();
-        for (x, y) in &self.explored_nodes {
+        for (x, y) in &self.frontier {
           // Convert pixel to coordinate
           let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
           let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
@@ -103,7 +194,6 @@ impl ExplorationTracker {
         }
         
         let _ = callback.call1(&JsValue::NULL, &arr);
-        self.explored_nodes.clear();
       }
     }
   }
@@ -161,9 +251,9 @@ pub fn find_path_rs(
   let height: usize = height as usize;
 
   // Create exploration tracker with callback using Rc<RefCell> for interior mutability
-  // Default batch_size is 125 for smoother animation (4x more frequent than before)
-  let batch_size = exploration_batch_size.unwrap_or(125);
-  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback, &elevations_geotiff, batch_size)));
+  // Large batch_size (10000) for fast animation - JS throttles to 30fps anyway
+  let batch_size = exploration_batch_size.unwrap_or(10000);
+  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback, &elevations_geotiff, batch_size, width, height)));
   let tracker_clone = tracker.clone();
 
   let heuristic = |&(x, y): &(usize, usize)| -> i32 {

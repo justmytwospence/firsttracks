@@ -40,10 +40,16 @@ interface PendingRequest {
   reject: (reason: unknown) => void;
 }
 
+// Throttle interval for exploration updates (ms) - ~30fps
+const EXPLORATION_THROTTLE_MS = 32;
+
 export function usePathfinder() {
   const workerRef = useRef<Worker | null>(null);
   const pendingRequestsRef = useRef<Map<string, PendingRequest>>(new Map());
   const requestIdRef = useRef(0);
+  const lastExplorationUpdateRef = useRef<number>(0);
+  const pendingExplorationNodesRef = useRef<[number, number][] | null>(null);
+  const explorationRafRef = useRef<number | null>(null);
   
   const [state, setState] = useState<PathfinderState>({
     isReady: false,
@@ -68,10 +74,28 @@ export function usePathfinder() {
       
       switch (response.type) {
         case 'exploration': {
-          // Add exploration nodes with timestamp for animation
-          const timestamp = Date.now();
-          const nodes = response.nodes.map(([lon, lat]) => ({ lon, lat, timestamp }));
-          setExplorationNodes(prev => [...prev, ...nodes]);
+          // Throttle exploration updates to maintain smooth animation
+          const now = performance.now();
+          pendingExplorationNodesRef.current = response.nodes;
+          
+          // If enough time has passed, update immediately
+          if (now - lastExplorationUpdateRef.current >= EXPLORATION_THROTTLE_MS) {
+            lastExplorationUpdateRef.current = now;
+            const timestamp = Date.now();
+            const nodes = response.nodes.map(([lon, lat]) => ({ lon, lat, timestamp }));
+            setExplorationNodes(nodes);
+          } else if (!explorationRafRef.current) {
+            // Schedule update on next frame if not already scheduled
+            explorationRafRef.current = requestAnimationFrame(() => {
+              explorationRafRef.current = null;
+              if (pendingExplorationNodesRef.current) {
+                lastExplorationUpdateRef.current = performance.now();
+                const timestamp = Date.now();
+                const nodes = pendingExplorationNodesRef.current.map(([lon, lat]) => ({ lon, lat, timestamp }));
+                setExplorationNodes(nodes);
+              }
+            });
+          }
           break;
         }
         
@@ -130,6 +154,9 @@ export function usePathfinder() {
     return () => {
       worker.terminate();
       workerRef.current = null;
+      if (explorationRafRef.current) {
+        cancelAnimationFrame(explorationRafRef.current);
+      }
     };
   }, []);
   

@@ -26,7 +26,7 @@ import {
 import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
-import { type Bounds, preloadDEM } from "@/lib/dem-cache";
+import { type Bounds, findCachedAzimuthBoundsContaining, preloadDEM } from "@/lib/dem-cache";
 import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
 import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
@@ -39,6 +39,7 @@ const parseGeoraster = require("georaster");
 
 // Dynamic imports for Leaflet components to avoid SSR issues
 const GeoJSONLayer = dynamic(() => import("@/components/leaflet-geojson-layer"), { ssr: false });
+const LeafletBoundsLayer = dynamic(() => import("@/components/leaflet-bounds-layer"), { ssr: false });
 const LeafletPathfindingLayer = dynamic(() => import("@/components/leaflet-pathfinding-layer"), { ssr: false });
 const LeafletRasterLayer = dynamic(() => import("@/components/leaflet-raster-layer"), { ssr: false });
 const LeafletExplorationLayer = dynamic(() => import("@/components/leaflet-exploration-layer").then(mod => ({ default: mod.LeafletExplorationLayer })), { ssr: false });
@@ -186,11 +187,7 @@ export default function PathFinderPage() {
   useEffect(() => {
     if (waypoints.length >= 2 && !isLoading && cachedBounds && waypoints.length !== lastAutoPathfindingCount.current) {
       lastAutoPathfindingCount.current = waypoints.length;
-      // Small delay to let the UI update first
-      const timer = setTimeout(() => {
-        findPathRef.current?.click();
-      }, 100);
-      return () => clearTimeout(timer);
+      findPathRef.current?.click();
     }
   }, [waypoints.length, isLoading, cachedBounds]);
 
@@ -277,6 +274,17 @@ export default function PathFinderPage() {
       return newBounds;
     }
     setBounds(newBounds);
+    
+    // Check if we have cached azimuth data covering this view
+    if (!cachedBounds) {
+      findCachedAzimuthBoundsContaining(newBounds).then((foundBounds) => {
+        if (foundBounds) {
+          console.log('[DEM] Found cached azimuth bounds covering view:', foundBounds);
+          setCachedBounds(foundBounds);
+        }
+      });
+    }
+    
     return newBounds;
   }
 
@@ -787,10 +795,10 @@ export default function PathFinderPage() {
             {/* Page indicators - clickable dots */}
             <div className="flex justify-center gap-2 py-2 shrink-0">
               {(() => {
-                const pageCount = path ? (pathAspects ? 4 : 3) : 1;
-                return Array.from({ length: pageCount }).map((_, i) => (
+                const pages = ['controls', 'elevation', 'gradient', 'aspect'].slice(0, path ? (pathAspects ? 4 : 3) : 1);
+                return pages.map((pageId, i) => (
                   <button
-                    key={i}
+                    key={pageId}
                     type="button"
                     onClick={() => {
                       if (sheetScrollRef.current) {
@@ -914,6 +922,30 @@ export default function PathFinderPage() {
           </div>
         )}
       </div>
+
+      {/* Footer - only in landscape */}
+      {!isPortrait && (
+        <div className="p-4 border-t text-center text-xs text-muted-foreground">
+          <span>Made by </span>
+          <a 
+            href="https://spencerboucher.com" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="underline hover:text-foreground transition-colors"
+          >
+            Spencer Boucher
+          </a>
+          <span> · </span>
+          <a 
+            href="https://buymeacoffee.com/justmytwospence" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="underline hover:text-foreground transition-colors"
+          >
+            Buy me a coffee ☕
+          </a>
+        </div>
+      )}
     </>
   );
 
@@ -953,8 +985,7 @@ export default function PathFinderPage() {
           {/* Help popover content - top left of map */}
           {helpOpen && (
             <div 
-              className="absolute top-3 left-3 z-[1000] w-80 overflow-y-auto rounded-md border bg-popover p-4 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95"
-              style={{ bottom: "3.5rem" }}
+              className="absolute top-3 left-3 z-[1000] w-80 max-h-[calc(100%-3.5rem)] overflow-y-auto rounded-md border bg-popover p-4 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95"
             >
               <button
                 type="button"
@@ -1000,6 +1031,11 @@ export default function PathFinderPage() {
                 <div className="space-y-2">
                   <h4 className="font-medium text-sm">Charts</h4>
                   <p className="text-xs text-muted-foreground">Hover on charts to highlight map sections</p>
+                  <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
+                    <li><strong>Elevation:</strong> Height profile along route</li>
+                    <li><strong>Gradient:</strong> Hover to see % of route steeper than that point</li>
+                    <li><strong>Aspect:</strong> Distribution of slope directions</li>
+                  </ul>
                 </div>
               </div>
             </div>
@@ -1024,6 +1060,8 @@ export default function PathFinderPage() {
                 persistDuration={100000}
                 radius={3}
                 color="rgba(59, 130, 246, 0.8)"
+                mode="boundary"
+                lineWidth={2}
               />
             )}
             {path && bounds && (
@@ -1041,6 +1079,9 @@ export default function PathFinderPage() {
                 aspectRaster={aspectRaster}
                 excludedAspects={excludedAspects}
               />
+            )}
+            {cachedBounds && (
+              <LeafletBoundsLayer bounds={cachedBounds} />
             )}
           </LazyPolylineMap>
         </div>

@@ -12,10 +12,12 @@ interface Mappable {
   polyline: LineString;
 }
 import {
+  BarController,
   BarElement,
   CategoryScale,
   Chart as ChartJS,
   Legend,
+  LineController,
   LineElement,
   LinearScale,
   PointElement,
@@ -26,8 +28,10 @@ import { useEffect, useRef, useState } from "react";
 import { Chart } from "react-chartjs-2";
 
 ChartJS.register(
+  BarController,
   BarElement,
   CategoryScale,
+  LineController,
   LinearScale,
   PointElement,
   LineElement,
@@ -245,7 +249,7 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
           title: (items) =>
             items[0]?.parsed?.x != null ? `Gradient: ${(items[0].parsed.x * 100).toFixed(1)}%` : '',
           label: (item) =>
-            `${item.dataset.label}: ${((item.parsed.y ?? 0) * 100).toFixed(1)}%`,
+            `${item.dataset.label}: ${((1 - (item.parsed.y ?? 0)) * 100).toFixed(1)}% steeper`,
         },
       },
     },
