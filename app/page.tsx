@@ -32,6 +32,7 @@ import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
 import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, HelpCircle, Mountain, RotateCcw, Route, TrendingUp, Undo2, Upload, X } from "lucide-react";
+import { SiBuymeacoffee, SiGithub } from "react-icons/si";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -926,24 +927,37 @@ export default function PathFinderPage() {
       {/* Footer - only in landscape */}
       {!isPortrait && (
         <div className="p-4 border-t text-center text-xs text-muted-foreground">
-          <span>Made by </span>
-          <a 
-            href="https://spencerboucher.com" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="underline hover:text-foreground transition-colors"
-          >
-            Spencer Boucher
-          </a>
-          <span> · </span>
-          <a 
-            href="https://buymeacoffee.com/justmytwospence" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="underline hover:text-foreground transition-colors"
-          >
-            Buy me a coffee ☕
-          </a>
+          <div>
+            <span>Made by </span>
+            <a 
+              href="https://spencerboucher.com" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="underline hover:text-foreground transition-colors"
+            >
+              Spencer Boucher
+            </a>
+          </div>
+          <div className="flex items-center justify-center gap-3 mt-1">
+            <a 
+              href="https://github.com/justmytwospence/vertfarm" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 underline hover:text-foreground transition-colors"
+            >
+              <SiGithub className="h-3 w-3" />
+              GitHub
+            </a>
+            <a 
+              href="https://buymeacoffee.com/justmytwospence" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 underline hover:text-foreground transition-colors"
+            >
+              <SiBuymeacoffee className="h-3 w-3" />
+              Buy me a coffee
+            </a>
+          </div>
         </div>
       )}
     </>
