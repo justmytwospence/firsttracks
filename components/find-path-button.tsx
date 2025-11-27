@@ -12,9 +12,10 @@ import { toast } from "sonner";
  * @param coords - Array of [lng, lat, elevation?] coordinates
  * @param windowSize - Size of the smoothing window (default 5)
  * @param sigma - Standard deviation for Gaussian weights (default 1.5)
+ * @param preserveIndices - Optional set of indices to preserve exactly (e.g., waypoints)
  * @returns Smoothed coordinates array
  */
-function smoothPath(coords: number[][], windowSize = 5, sigma = 1.5): number[][] {
+function smoothPath(coords: number[][], windowSize = 5, sigma = 1.5, preserveIndices?: Set<number>): number[][] {
   if (coords.length < 3) return coords;
   
   // Generate Gaussian weights
@@ -37,8 +38,8 @@ function smoothPath(coords: number[][], windowSize = 5, sigma = 1.5): number[][]
   const hasElevation = coords[0].length >= 3;
   
   for (let i = 0; i < coords.length; i++) {
-    // Keep first and last points unchanged
-    if (i < halfWindow || i >= coords.length - halfWindow) {
+    // Keep first, last, and any preserved indices unchanged
+    if (i < halfWindow || i >= coords.length - halfWindow || preserveIndices?.has(i)) {
       result.push([...coords[i]]);
       continue;
     }
@@ -69,11 +70,16 @@ function smoothPath(coords: number[][], windowSize = 5, sigma = 1.5): number[][]
 
 /**
  * Apply multiple passes of smoothing for stronger effect.
+ * @param coords - Array of coordinates
+ * @param passes - Number of smoothing passes
+ * @param windowSize - Size of the smoothing window
+ * @param sigma - Standard deviation for Gaussian weights
+ * @param preserveIndices - Optional set of indices to preserve exactly (e.g., waypoints)
  */
-function multiPassSmooth(coords: number[][], passes = 3, windowSize = 5, sigma = 1.5): number[][] {
+function multiPassSmooth(coords: number[][], passes = 3, windowSize = 5, sigma = 1.5, preserveIndices?: Set<number>): number[][] {
   let result = coords;
   for (let i = 0; i < passes; i++) {
-    result = smoothPath(result, windowSize, sigma);
+    result = smoothPath(result, windowSize, sigma, preserveIndices);
   }
   return result;
 }
@@ -110,7 +116,7 @@ interface FindPathButtonProps {
   explorationDelayMs?: number;
   className?: string;
   onlyLastSegment?: boolean;
-  preloadBounds?: Bounds | null; // Bounds to preload azimuths for (typically set on first waypoint)
+  preloadBounds?: Bounds | null;
 }
 
 // Worker message types
@@ -322,7 +328,16 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
     }, [preloadBounds, setAspectRaster]);
     
     const handleClick = useCallback(async () => {
-      if (!bounds || !workerRef.current) return;
+      console.log('=== FindPathButton handleClick START ===');
+      console.log('bounds:', bounds);
+      console.log('workerRef.current:', !!workerRef.current);
+      console.log('waypoints.length:', waypoints.length);
+      console.log('onlyLastSegment:', onlyLastSegment);
+      
+      if (!bounds || !workerRef.current) {
+        console.log('Early return: bounds or worker not ready');
+        return;
+      }
       setIsLoading(true);
       onStartPathfinding?.();
       batchCountRef.current = 0;
@@ -412,11 +427,22 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         }
         
         // Find paths - either all segments or just the last one
+        // onlyLastSegment=true when adding a new waypoint to an existing path
+        // onlyLastSegment=false when dragging/inserting waypoints (triggers full re-pathfinding)
         const startSegment = onlyLastSegment ? waypoints.length - 2 : 0;
         let pathSegmentCounter = onlyLastSegment ? 1 : 0; // Start at 1 to append if onlyLastSegment
+        console.log('FindPathButton: waypoints.length =', waypoints.length, 'onlyLastSegment =', onlyLastSegment, 'startSegment =', startSegment);
         
-        for (let i = startSegment; i < waypoints.length - 1; i++) {
-          const pathPromise = new Promise<string>((resolve, reject) => {
+        // Start polling the exploration queue so visualization happens during pathfinding
+        const queuePollInterval = setInterval(() => {
+          if (explorationQueueRef.current.length > 0 && !processingRef.current) {
+            processExplorationQueue();
+          }
+        }, 16); // ~60fps
+        
+        try {
+          for (let i = startSegment; i < waypoints.length - 1; i++) {
+            const pathPromise = new Promise<string>((resolve, reject) => {
             const id = `path_${Date.now()}_${i}`;
             
             const handler = (event: MessageEvent<WorkerResponse>) => {
@@ -479,7 +505,9 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             );
             
             // Apply Gaussian smoothing to reduce jaggedness from grid-based pathfinding
-            const smoothedCoordinates = multiPassSmooth(rawCoordinates, 3, 5, 1.5);
+            // Preserve the first and last coordinates (waypoints) exactly
+            const preserveIndices = new Set([0, rawCoordinates.length - 1]);
+            const smoothedCoordinates = multiPassSmooth(rawCoordinates, 3, 5, 1.5, preserveIndices);
             
             const path = {
               type: "LineString",
@@ -500,6 +528,10 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               throw segmentError;
             }
           }
+        }
+        } finally {
+          // Stop polling the exploration queue
+          clearInterval(queuePollInterval);
         }
       } catch (error) {
         toast.dismiss(loadingToastId);

@@ -17,6 +17,8 @@ type GeoJSONLayerProps = {
   polylineProperties?: FeatureCollection;
   interactive?: boolean;
   hoverIndexStore?: HoverIndexStore;
+  onPathClick?: (point: Point, segmentIndex: number) => void;
+  dragEndTimeRef?: React.RefObject<number>;
 };
 
 export default function GeoJSONLayer({
@@ -24,6 +26,8 @@ export default function GeoJSONLayer({
   polylineProperties,
   interactive = false,
   hoverIndexStore = defaultHoverIndexStore,
+  onPathClick,
+  dragEndTimeRef,
 }: GeoJSONLayerProps) {
   const map = useMap();
   const geoJsonRef = useRef<L.GeoJSON | null>(null);
@@ -104,6 +108,8 @@ export default function GeoJSONLayer({
         polyline={polyline}
         geoJsonRef={geoJsonRef}
         hoverIndexStore={hoverIndexStore}
+        onPathClick={onPathClick}
+        dragEndTimeRef={dragEndTimeRef}
       />
     );
   }

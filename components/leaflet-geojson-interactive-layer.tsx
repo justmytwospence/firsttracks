@@ -17,12 +17,16 @@ type GeoJsonInteractionLayerProps = {
   polyline: LineString;
   geoJsonRef: React.RefObject<L.GeoJSON | null>;
   hoverIndexStore: HoverIndexStore;
+  onPathClick?: (point: Point, segmentIndex: number) => void;
+  dragEndTimeRef?: React.RefObject<number>;
 };
 
 export default function GeoJsonInteractionLayer({
   polyline,
   geoJsonRef,
   hoverIndexStore,
+  onPathClick,
+  dragEndTimeRef,
 }: GeoJsonInteractionLayerProps) {
   const map = useMap();
   const hoverMarkerRef = useRef<L.Marker | null>(null);
@@ -30,7 +34,91 @@ export default function GeoJsonInteractionLayer({
   const { hoveredGradient } = gradientStore();
   const { hoveredAspect } = aspectStore();
 
-  const handleMouseMove = (e: L.LeafletMouseEvent) => {
+  // Find the closest point on the path and corresponding segment index
+  const findClosestPointOnPath = useCallback(
+    (latlng: L.LatLng): { point: Point; segmentIndex: number; distance: number } | null => {
+      if (polyline.coordinates.length < 2) return null;
+
+      let minDist = Number.POSITIVE_INFINITY;
+      let closestPoint: Point | null = null;
+      let closestSegmentIndex = -1;
+
+      // Check each segment of the polyline
+      for (let i = 0; i < polyline.coordinates.length - 1; i++) {
+        const [x1, y1] = polyline.coordinates[i];
+        const [x2, y2] = polyline.coordinates[i + 1];
+
+        // Find closest point on this line segment to the click point
+        const A = latlng.lng - x1;
+        const B = latlng.lat - y1;
+        const C = x2 - x1;
+        const D = y2 - y1;
+
+        const dot = A * C + B * D;
+        const lenSq = C * C + D * D;
+        let param = -1;
+        if (lenSq !== 0) param = dot / lenSq;
+
+        let closestX: number;
+        let closestY: number;
+
+        if (param < 0) {
+          closestX = x1;
+          closestY = y1;
+        } else if (param > 1) {
+          closestX = x2;
+          closestY = y2;
+        } else {
+          closestX = x1 + param * C;
+          closestY = y1 + param * D;
+        }
+
+        const dist = L.latLng(closestY, closestX).distanceTo(latlng);
+        if (dist < minDist) {
+          minDist = dist;
+          closestPoint = {
+            type: "Point",
+            coordinates: [closestX, closestY],
+          };
+          closestSegmentIndex = i;
+        }
+      }
+
+      if (closestPoint && closestSegmentIndex >= 0) {
+        return { point: closestPoint, segmentIndex: closestSegmentIndex, distance: minDist };
+      }
+      return null;
+    },
+    [polyline]
+  );
+
+  // Handle click on path
+  const handlePathClick = useCallback(
+    (e: L.LeafletMouseEvent) => {
+      if (!onPathClick) return;
+
+      // Don't insert waypoint if a marker was just dragged (within 500ms)
+      if (dragEndTimeRef?.current) {
+        const timeSinceDragEnd = Date.now() - dragEndTimeRef.current;
+        if (timeSinceDragEnd < 500) {
+          console.log('GeoJSON handlePathClick suppressed - marker drag just ended', timeSinceDragEnd, 'ms ago');
+          return;
+        }
+      }
+
+      console.log('GeoJSON handlePathClick called');
+      const result = findClosestPointOnPath(e.latlng);
+      if (result && result.distance < 50) {
+        // Within 50 meters of the path
+        console.log('Path click - inserting waypoint at segment', result.segmentIndex);
+        L.DomEvent.stopPropagation(e);
+        onPathClick(result.point, result.segmentIndex);
+      }
+    },
+    [findClosestPointOnPath, onPathClick, dragEndTimeRef]
+  );
+
+  const handleMouseMove = useCallback((e: L.LeafletMouseEvent) => {
     const mousePoint = L.latLng(e.latlng.lat, e.latlng.lng);
     let minDist = Number.POSITIVE_INFINITY;
     let closestIndex = -1;
@@ -46,10 +134,23 @@ export default function GeoJsonInteractionLayer({
     }
 
     setHoverIndex(minDist < 100 ? closestIndex : -1);
-  };
+  }, [polyline, setHoverIndex]);
 
-  map.on("mousemove", handleMouseMove);
-  map.on("mouseout", () => setHoverIndex(-1));
+  // Set up event listeners
+  useEffect(() => {
+    map.on("mousemove", handleMouseMove);
+    map.on("mouseout", () => setHoverIndex(-1));
+    if (onPathClick) {
+      map.on("click", handlePathClick);
+    }
+
+    // Cleanup event listeners
+    return () => {
+      map.off("mousemove", handleMouseMove);
+      map.off("mouseout");
+      map.off("click", handlePathClick);
+    };
+  }, [map, handleMouseMove, handlePathClick, onPathClick, setHoverIndex]);
 
   // respond to hoverIndex
   const updateHoverPoint = useCallback(

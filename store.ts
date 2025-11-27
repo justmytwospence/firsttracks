@@ -9,7 +9,8 @@ interface HoverIndexState {
 
 interface GradientState {
   hoveredGradient: number | null;
-  setHoveredGradient: (gradient: number | null) => void;
+  gradientHighlightMode: 'cdf' | 'histogram';  // 'cdf' = <= threshold, 'histogram' = exact bin
+  setHoveredGradient: (gradient: number | null, mode?: 'cdf' | 'histogram') => void;
 }
 
 interface AspectState {
@@ -34,9 +35,10 @@ export const hoverIndexStore = createHoverIndexStore();
 export const createGradientStore = () => create<GradientState>()(
   subscribeWithSelector((set) => ({
     hoveredGradient: null,
-    setHoveredGradient: (gradient) => set((state) => {
-      if (state.hoveredGradient === gradient) return state;
-      return { hoveredGradient: gradient };
+    gradientHighlightMode: 'cdf',
+    setHoveredGradient: (gradient, mode = 'cdf') => set((state) => {
+      if (state.hoveredGradient === gradient && state.gradientHighlightMode === mode) return state;
+      return { hoveredGradient: gradient, gradientHighlightMode: mode };
     }),
   }))
 );

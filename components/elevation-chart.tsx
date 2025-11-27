@@ -41,7 +41,7 @@ export default function ElevationChart({
   const chartRef = useRef<ChartJS<"line">>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { setHoverIndex } = hoverIndexStore();
-  const { hoveredGradient } = gradientStore();
+  const { hoveredGradient, gradientHighlightMode } = gradientStore();
 
   // Resize chart when container size changes (e.g., sidebar toggle)
   useEffect(() => {
@@ -54,12 +54,32 @@ export default function ElevationChart({
       }
     };
 
-    const resizeObserver = new ResizeObserver(resizeChart);
+    // Initial resize after mount to ensure correct sizing
+    requestAnimationFrame(resizeChart);
+
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(resizeChart);
+    });
     resizeObserver.observe(container);
 
-    // Handle transition end with a small delay to ensure layout has settled
+    // Find and observe the main flex container that resizes with sidebar
+    let flexContainer: Element | null = container;
+    while (flexContainer && flexContainer !== document.body) {
+      const classList = flexContainer.classList;
+      if (classList.contains('flex-1') || flexContainer.id === 'main-content') {
+        resizeObserver.observe(flexContainer);
+        break;
+      }
+      flexContainer = flexContainer.parentElement;
+    }
+
+    // Handle any transition end (captures sidebar width transition)
     const handleTransitionEnd = () => {
+      // Multiple delayed resizes to ensure layout has settled
+      resizeChart();
       setTimeout(resizeChart, 50);
+      setTimeout(resizeChart, 150);
+      setTimeout(resizeChart, 350);
     };
     document.addEventListener('transitionend', handleTransitionEnd);
 
@@ -80,8 +100,9 @@ export default function ElevationChart({
   const elevationMin = Math.min(...elevation);
   const elevationMax = Math.max(...elevation);
   const elevationPadding = (elevationMax - elevationMin) * 0.1;
-  const gradientMin = Math.max(Math.min(...computedGradients), -0.3);
-  const gradientMax = Math.min(Math.max(...computedGradients), 0.3);
+  const gradientMin = Math.min(...computedGradients);
+  const gradientMax = Math.max(...computedGradients);
+  const gradientPadding = (gradientMax - gradientMin) * 0.05;
 
   // Initial chart configuration
   const initialData: ChartData<"line"> = {
@@ -110,7 +131,23 @@ export default function ElevationChart({
         segment: {
           backgroundColor: (ctx) => {
             const gradientValue = ctx.p0.parsed.y;
-            return hoveredGradient && gradientValue >= hoveredGradient
+            if (hoveredGradient === null) {
+              return "rgba(128, 128, 128, 0.5)";
+            }
+            
+            let isHighlighted = false;
+            if (gradientHighlightMode === 'histogram') {
+              // Histogram mode: highlight only points within the 1% bin
+              const binSize = 0.01;
+              const binMin = hoveredGradient - binSize / 2;
+              const binMax = hoveredGradient + binSize / 2;
+              isHighlighted = gradientValue >= binMin && gradientValue < binMax;
+            } else {
+              // CDF mode: highlight points >= threshold
+              isHighlighted = gradientValue >= hoveredGradient;
+            }
+            
+            return isHighlighted
               ? "rgba(255, 0, 0, 0.5)"
               : "rgba(128, 128, 128, 0.5)";
           },
@@ -137,6 +174,9 @@ export default function ElevationChart({
         title: {
           display: true,
           text: "Miles",
+          font: {
+            weight: 'bold',
+          },
         },
       },
       elevation: {
@@ -148,6 +188,9 @@ export default function ElevationChart({
         title: {
           display: true,
           text: "Elevation (ft)",
+          font: {
+            weight: 'bold',
+          },
         },
         ticks: {
           stepSize: 100,
@@ -161,11 +204,14 @@ export default function ElevationChart({
         type: "linear" as const,
         display: true,
         position: "right" as const,
-        min: gradientMin,
-        max: gradientMax,
+        min: gradientMin - gradientPadding,
+        max: gradientMax + gradientPadding,
         title: {
           display: true,
           text: "Gradient (%)",
+          font: {
+            weight: 'bold',
+          },
         },
         ticks: {
           stepSize: 0.01,
@@ -272,8 +318,10 @@ export default function ElevationChart({
   }, [hoverIndexStore]);
 
   return (
-    <div ref={containerRef} className="h-full w-full">
-      <Line ref={chartRef} data={initialData} options={initialOptions} />
+    <div ref={containerRef} className="h-full w-full" style={{ position: 'relative' }}>
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <Line ref={chartRef} data={initialData} options={initialOptions} />
+      </div>
     </div>
   );
 }

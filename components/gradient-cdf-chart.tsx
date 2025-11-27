@@ -12,6 +12,7 @@ interface Mappable {
   polyline: LineString;
 }
 import {
+  BarElement,
   CategoryScale,
   Chart as ChartJS,
   Legend,
@@ -22,9 +23,10 @@ import {
   Tooltip,
 } from "chart.js";
 import { useEffect, useRef, useState } from "react";
-import { Line } from "react-chartjs-2";
+import { Chart } from "react-chartjs-2";
 
 ChartJS.register(
+  BarElement,
   CategoryScale,
   LinearScale,
   PointElement,
@@ -37,7 +39,7 @@ ChartJS.register(
 const CHART_COLORS = ["#3b82f6", "#64748b", "#f43f5e"];
 
 export default function GradientCdfChart({ mappables }: { mappables: Mappable[] }) {
-  const chartRef = useRef<ChartJS<"line">>(null);
+  const chartRef = useRef<ChartJS>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { setHoveredGradient } = gradientStore();
   const [isGradientLocked, setIsGradientLocked] = useState(false);
@@ -62,9 +64,25 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
     });
     resizeObserver.observe(container);
 
-    // Handle transition end with a small delay to ensure layout has settled
+    // Find and observe the main flex container that resizes with sidebar
+    // Look for an ancestor with flex-1 class or the main content area
+    let flexContainer: Element | null = container;
+    while (flexContainer && flexContainer !== document.body) {
+      const classList = flexContainer.classList;
+      if (classList.contains('flex-1') || flexContainer.id === 'main-content') {
+        resizeObserver.observe(flexContainer);
+        break;
+      }
+      flexContainer = flexContainer.parentElement;
+    }
+
+    // Handle any transition end (captures sidebar width transition)
     const handleTransitionEnd = () => {
+      // Multiple delayed resizes to ensure layout has settled
+      resizeChart();
       setTimeout(resizeChart, 50);
+      setTimeout(resizeChart, 150);
+      setTimeout(resizeChart, 350);
     };
     document.addEventListener('transitionend', handleTransitionEnd);
 
@@ -86,6 +104,33 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
   const allGradients = gradients.flat();
   const gradientMin = Math.min(...allGradients);
   const gradientMax = Math.max(...allGradients);
+  
+  // Use coarser bins for histogram (1% increments instead of 0.1%)
+  const histogramBinSize = 0.01;
+  const histogramBins = Array.from(
+    { length: Math.ceil((gradientMax - gradientMin) / histogramBinSize) + 1 },
+    (_, i) => Number.parseFloat((gradientMin + i * histogramBinSize).toFixed(3))
+  );
+  
+  // Compute histogram counts for each bin
+  const computeHistogram = (grads: number[], bins: number[]): number[] => {
+    const counts = new Array(bins.length).fill(0);
+    for (const g of grads) {
+      const binIndex = Math.min(
+        Math.floor((g - gradientMin) / histogramBinSize),
+        bins.length - 1
+      );
+      if (binIndex >= 0) counts[binIndex]++;
+    }
+    // Normalize to density (proportion)
+    const total = grads.length;
+    return counts.map(c => c / total);
+  };
+  
+  const histograms = gradients.map(g => computeHistogram(g, histogramBins));
+  const maxHistogramValue = Math.max(...histograms.flat());
+  
+  // Fine-grained x-axis for CDF
   const xAxisRange = Array.from(
     { length: Math.round((gradientMax - gradientMin) / 0.001) + 1 },
     (_, i) => Number.parseFloat((gradientMin + i * 0.001).toFixed(3))
@@ -93,23 +138,40 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
 
   // Compute CDFs
   const cdfs = gradients.map((g) => computeCdf(g, xAxisRange));
-  // baseLogger.debug(JSON.stringify(cdfs, null, 2));
+
+  // Create datasets: histogram bars first (behind), then CDF lines
+  const histogramDatasets = mappables.map((mappable, i) => ({
+    type: 'bar' as const,
+    label: `${mappable.name || `Route ${i + 1}`} (histogram)`,
+    data: histogramBins.map((x, j) => ({ x, y: histograms[i][j] })),
+    backgroundColor: `${CHART_COLORS[i % CHART_COLORS.length]}33`, // 20% opacity
+    borderColor: 'transparent',
+    borderWidth: 0,
+    barPercentage: 1.0,
+    categoryPercentage: 1.0,
+    yAxisID: 'histogram',
+    order: 2, // Render behind CDF lines
+  }));
+
+  const cdfDatasets = mappables.map((mappable, i) => ({
+    type: 'line' as const,
+    label: mappable.name || `Route ${i + 1}`,
+    data: xAxisRange.map((x, j) => ({ x, y: cdfs[i][j] })),
+    borderColor: CHART_COLORS[i % CHART_COLORS.length],
+    backgroundColor: "transparent",
+    borderWidth: 2,
+    tension: 0.1,
+    fill: false,
+    pointRadius: 0,
+    yAxisID: 'y',
+    order: 1, // Render in front
+  }));
 
   const initialData = {
-    labels: xAxisRange,
-    datasets: mappables.map((mappable, i) => ({
-      label: mappable.name || `Route ${i + 1}`,
-      data: xAxisRange.map((x, j) => ({ x, y: cdfs[i][j] })),
-      borderColor: CHART_COLORS[i % CHART_COLORS.length],
-      backgroundColor: "transparent",
-      borderWidth: 2,
-      tension: 0.1,
-      fill: false,
-      pointRadius: 0,
-    })),
+    datasets: [...histogramDatasets, ...cdfDatasets],
   };
 
-  const initialOptions: ChartOptions<"line"> = {
+  const initialOptions: ChartOptions<"bar" | "line"> = {
     responsive: true,
     maintainAspectRatio: false,
     scales: {
@@ -123,9 +185,14 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
         title: {
           display: true,
           text: "Gradient",
+          font: {
+            weight: 'bold',
+          },
         },
       },
       y: {
+        type: "linear",
+        position: "left",
         min: 0,
         max: 1,
         ticks: {
@@ -134,20 +201,46 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
         title: {
           display: true,
           text: "CDF",
+          font: {
+            weight: 'bold',
+          },
+        },
+      },
+      histogram: {
+        type: "linear",
+        position: "right",
+        min: 0,
+        max: Math.ceil(maxHistogramValue * 100) / 100 + 0.01, // Round up with padding
+        grid: {
+          drawOnChartArea: false,
+        },
+        ticks: {
+          callback: (value) => `${(Number(value) * 100).toFixed(0)}%`,
+        },
+        title: {
+          display: true,
+          text: "Density",
+          font: {
+            weight: 'bold',
+          },
         },
       },
     },
     plugins: {
       title: {
         display: true,
-        text: "Cumulative Density Function of Gradient",
+        text: "Gradient Distribution",
       },
       legend: {
         display: mappables.length > 1,
         position: "top",
+        labels: {
+          filter: (item) => !item.text.includes('(histogram)'),
+        },
       },
       tooltip: {
         mode: "index" as const,
+        filter: (item) => !item.dataset.label?.includes('(histogram)'),
         callbacks: {
           title: (items) =>
             `Gradient: ${(items[0].parsed.x * 100).toFixed(1)}%`,
@@ -175,8 +268,13 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       const xAxis = chart.scales.x;
 
       if (x >= xAxis.left && x <= xAxis.right) {
-        const value = xAxis.getValueForPixel(x);
-        setHoveredGradient(value ?? null);
+        const gradientValue = xAxis.getValueForPixel(x);
+        if (gradientValue === null || gradientValue === undefined) {
+          setHoveredGradient(null);
+          return;
+        }
+        // CDF mode: highlight all points >= this gradient
+        setHoveredGradient(gradientValue, 'cdf');
       } else {
         setHoveredGradient(null);
       }
@@ -191,8 +289,10 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       const xAxis = chart.scales.x;
 
       if (x >= xAxis.left && x <= xAxis.right) {
-        const value = xAxis.getValueForPixel(x);
-        setHoveredGradient(value ?? null);
+        const gradientValue = xAxis.getValueForPixel(x);
+        if (gradientValue === null || gradientValue === undefined) return;
+        
+        setHoveredGradient(gradientValue, 'cdf');
         setIsGradientLocked(true);
       }
     },
@@ -201,12 +301,15 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
   return (
     <div
       ref={containerRef}
-      className="w-full h-full p-4"
+      className="w-full h-full"
+      style={{ position: 'relative' }}
       onMouseLeave={() => {
         setIsGradientLocked(false);
       }}
     >
-      <Line ref={chartRef} data={initialData} options={initialOptions} />
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <Chart type="bar" ref={chartRef} data={initialData} options={initialOptions} />
+      </div>
     </div>
   );
 }
