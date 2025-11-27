@@ -1,7 +1,6 @@
 "use server";
 
 import { getTopo } from "@/lib/geo/open-topo";
-import { checkGeoTIFFCache, getGeoTiff, insertGeoTiff } from "@/lib/geo/tiling";
 import type { Point } from "geojson";
 import { type Aspect, computeAzimuths, findPathRs } from "pathfinder";
 
