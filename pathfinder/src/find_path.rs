@@ -26,6 +26,7 @@ fn distance(a: (usize, usize), b: (usize, usize)) -> f64 {
   ((dx * dx) + (dy * dy)).sqrt()
 }
 
+#[allow(dead_code)]
 fn logistic_multiplier(x: f64) -> f64 {
   const SCALE: f64 = 5.0;
   const GROWTH_RATE: f64 = 70.0;
@@ -35,6 +36,7 @@ fn logistic_multiplier(x: f64) -> f64 {
   logistic_curve + y_shift
 }
 
+#[allow(dead_code)]
 fn exponential_multiplier(x: f64) -> f64 {
   const M: f64 = 50.0;
   const B: f64 = 0.1;

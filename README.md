@@ -1,6 +1,6 @@
-# Pathfinder
+# Vertfarm
 
-Interactive terrain-aware route planning with DEM analysis. Click-to-place waypoints on a map and find optimal paths using terrain analysis.
+Interactive terrain-aware route planning with DEM analysis. Plan ski tours, backcountry routes, and hiking trails with real-time terrain analysis.
 
 ## Features
 
@@ -9,22 +9,22 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 - **Real-time Visualization**: Watch the pathfinding algorithm explore the terrain
 - **Aspect Analysis**: Visualize terrain aspects with a raster overlay; exclude certain aspects from pathfinding
 - **Gradient Control**: Set maximum gradient constraints for the pathfinding algorithm
-- **Elevation Profile**: View the elevation profile of your planned route
-- **Gradient Distribution**: Analyze the gradient distribution with a CDF chart
+- **Elevation Profile**: View the elevation profile and gradient of your planned route
+- **Gradient Distribution**: Analyze the gradient distribution with histogram and CDF charts
 - **Aspect Distribution**: See the aspect distribution of your route
-- **GPX Export**: Download your planned route as a GPX file
+- **GPX Import/Export**: Import existing routes or download your planned route as GPX
 
 ## Tech Stack
 
 - **Framework**: React 19, Next.js 15 with App Router
 - **Deployment**: Vercel
-- **State**: Zustand
+- **State**: Zustand with subscribeWithSelector middleware
 - **Styling**: Tailwind CSS, shadcn/ui
 - **Maps**: Leaflet, React Leaflet
-- **Charts**: Chart.js
+- **Charts**: Chart.js, react-chartjs-2
 - **Rust Integration**: WebAssembly via wasm-bindgen, running in a Web Worker
 - **Pathfinding Algorithm**: A* via pathfinding.rs crate
-- **Terrain Analysis**: Custom Sobel filter for aspect computation
+- **Terrain Analysis**: Custom 5x5 Sobel filter for aspect/gradient computation
 - **DEM Data**: OpenTopography API (cached in IndexedDB)
 
 ## Environment Variables
@@ -46,18 +46,26 @@ npm run build:wasm
 # Start development server
 npm run dev
 
-# Full production build
+# Full production build (WASM + Next.js)
 npm run build
 ```
+
+### Prerequisites
+
+- Node.js 22+
+- Rust toolchain with `wasm32-unknown-unknown` target
+- wasm-pack (`cargo install wasm-pack`)
 
 ## Architecture
 
 The pathfinding runs entirely client-side:
 1. DEM tiles are fetched via `/api/dem` proxy (keeps API key secret)
 2. Tiles are cached in IndexedDB for offline/repeat use
-3. WASM module runs in a Web Worker for non-blocking UI
-4. Exploration updates stream back to main thread for real-time visualization
+3. Azimuths and gradients are computed once per region and cached
+4. WASM module runs in a Web Worker for non-blocking UI
+5. Exploration updates stream back to main thread for real-time visualization
+6. Paths are smoothed using Gaussian-weighted moving average
 
 ## Deployment
 
-The app is deployed to Vercel. The WASM module is built during the Vercel build process.
+The app deploys to Vercel. The WASM module is built during the Vercel build process using Rust/wasm-pack installed via the custom install command.

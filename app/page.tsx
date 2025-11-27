@@ -534,7 +534,8 @@ export default function PathFinderPage() {
         if (feature.geometry.type === "LineString") {
           lineCoords = feature.geometry.coordinates as number[][];
           break;
-        } else if (feature.geometry.type === "MultiLineString") {
+        }
+        if (feature.geometry.type === "MultiLineString") {
           // Flatten MultiLineString into a single LineString
           lineCoords = (feature.geometry.coordinates as number[][][]).flat();
           break;

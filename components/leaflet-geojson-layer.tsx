@@ -1,3 +1,4 @@
+import type { Aspect } from "@/components/find-path-button";
 import { computeGradient } from "@/lib/geo/geo";
 import type { HoverIndexStore } from "@/store";
 import {
@@ -6,7 +7,6 @@ import {
 } from "@/store";
 import type { Feature, FeatureCollection, LineString, Point } from "geojson";
 import L from "leaflet";
-import type { Aspect } from "pathfinder";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useMap } from "react-leaflet";
@@ -100,7 +100,7 @@ export default function GeoJSONLayer({
       geoJsonRef.current?.remove();
       hoverMarkerRef.current?.remove();
     };
-  }, [features, map]); // Updated dependencies
+  }, [features, map, interactive, polyline]); // Updated dependencies
 
   if (interactive) {
     return (

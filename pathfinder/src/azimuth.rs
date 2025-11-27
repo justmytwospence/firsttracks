@@ -120,7 +120,7 @@ fn compute_gradient_along_azimuth(gx: f64, gy: f64, azimuth: f64) -> f64 {
 /// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for each pixel on a `Vec<f32>`
 #[wasm_bindgen]
 pub fn compute_azimuths(elevations_geotiff: &[u8]) -> Result<AzimuthResult, JsValue> {
-  let mut cursor: Cursor<Vec<u8>> = Cursor::new(elevations_geotiff.to_vec());
+  let cursor: Cursor<Vec<u8>> = Cursor::new(elevations_geotiff.to_vec());
   let mut elevations_geotiff: GeoTiffReader<Cursor<Vec<u8>>> =
     GeoTiffReader::open(cursor)
       .map_err(|e| JsValue::from_str(&format!("Failed to open GeoTIFF: {:?}", e)))?;

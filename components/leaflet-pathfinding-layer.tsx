@@ -168,7 +168,9 @@ export default function LeafletPathfindingLayer({
   // Create and manage markers using native Leaflet API for reliable dragging
   useEffect(() => {
     // Remove old markers
-    leafletMarkersRef.current.forEach(marker => marker.remove());
+    for (const marker of leafletMarkersRef.current) {
+      marker.remove();
+    }
     leafletMarkersRef.current = [];
 
     // Create new markers
@@ -219,10 +221,12 @@ export default function LeafletPathfindingLayer({
 
     // Cleanup on unmount
     return () => {
-      leafletMarkersRef.current.forEach(marker => marker.remove());
+      for (const marker of leafletMarkersRef.current) {
+        marker.remove();
+      }
       leafletMarkersRef.current = [];
     };
-  }, [markers, map, onMarkerDragEnd]);
+  }, [markers, map, onMarkerDragEnd, effectiveDragEndTimeRef]);
 
   // Debug: log when markers or markerIds change
   useEffect(() => {

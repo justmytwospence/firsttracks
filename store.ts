@@ -1,4 +1,4 @@
-import type { Aspect } from "pathfinder";
+import type { Aspect } from "@/components/find-path-button";
 import { type StoreApi, type UseBoundStore, create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 

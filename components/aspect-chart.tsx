@@ -1,7 +1,7 @@
+import type { Aspect } from "@/components/find-path-button";
 import { aspectStore } from '@/store';
 import { type ActiveElement, ArcElement, type ChartEvent, Chart as ChartJS, Legend, RadialLinearScale, Tooltip } from 'chart.js';
 import type { FeatureCollection } from 'geojson';
-import type { Aspect } from "pathfinder";
 import { useState } from 'react';
 import { useMemo } from 'react';
 import { PolarArea } from 'react-chartjs-2';
@@ -69,9 +69,8 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
         startAngle: -22.5,
         ticks: {
           display: true,
-          callback: function(tickValue: number | string, index: number, ticks: any[]) {
-            const chart = (this as any).chart;
-            const total = chart.data.datasets[0].data.reduce((a: number, b: number) => a + b, 0);
+          callback: function(this: { chart: ChartJS }, tickValue: number | string) {
+            const total = this.chart.data.datasets[0].data.reduce((a: number, b) => a + (b as number), 0);
             return `${Math.round((Number(tickValue) / total) * 100)}%`;
           },
           backdropColor: 'transparent'  // Makes the background transparent
@@ -82,9 +81,9 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
     plugins: {
       tooltip: {
         callbacks: {
-          label: (context: any) => {
-            const total = context.chart.data.datasets[0].data.reduce((a: number, b: number) => a + b, 0);
-            const value = context.raw;
+          label: (context) => {
+            const total = context.chart.data.datasets[0].data.reduce((a: number, b) => a + (b as number), 0);
+            const value = context.raw as number;
             const percentage = ((value / total) * 100).toFixed(1);
             return `${percentage}%`;
           }
