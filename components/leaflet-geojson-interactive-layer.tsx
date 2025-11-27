@@ -1,5 +1,5 @@
 import { computeGradient } from "@/lib/geo/geo";
-import type { Aspect } from "@/pathfinder";
+import type { Aspect } from "pathfinder";
 import type { HoverIndexStore } from "@/store";
 import {
   aspectStore,
