@@ -1,7 +1,8 @@
 "use client";
 
 import { computeCdf, computeGradient } from "@/lib/geo/geo";
-import { gradientStore } from "@/store";
+import { formatSlope, gradientToSlopeAngle } from "@/lib/utils";
+import { gradientStore, slopeUnitStore } from "@/store";
 import type { ActiveElement, ChartEvent, ChartOptions } from "chart.js";
 import type { LineString } from "geojson";
 
@@ -47,6 +48,7 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
   const containerRef = useRef<HTMLDivElement>(null);
   const { setHoveredGradient } = gradientStore();
   const [isGradientLocked, setIsGradientLocked] = useState(false);
+  const useDegrees = slopeUnitStore((s) => s.useDegrees);
 
   // Resize chart when container size changes (e.g., sidebar toggle)
   useEffect(() => {
@@ -147,7 +149,10 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
   const histogramDatasets = mappables.map((mappable, i) => ({
     type: 'bar' as const,
     label: `${mappable.name || `Route ${i + 1}`} (histogram)`,
-    data: histogramBins.map((x, j) => ({ x, y: histograms[i][j] })),
+    data: histogramBins.map((x, j) => ({ 
+      x: useDegrees ? gradientToSlopeAngle(x) : x, 
+      y: histograms[i][j] 
+    })),
     backgroundColor: `${CHART_COLORS[i % CHART_COLORS.length]}33`, // 20% opacity
     borderColor: 'transparent',
     borderWidth: 0,
@@ -160,7 +165,10 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
   const cdfDatasets = mappables.map((mappable, i) => ({
     type: 'line' as const,
     label: mappable.name || `Route ${i + 1}`,
-    data: xAxisRange.map((x, j) => ({ x, y: cdfs[i][j] })),
+    data: xAxisRange.map((x, j) => ({ 
+      x: useDegrees ? gradientToSlopeAngle(x) : x, 
+      y: cdfs[i][j] 
+    })),
     borderColor: CHART_COLORS[i % CHART_COLORS.length],
     backgroundColor: "transparent",
     borderWidth: 2,
@@ -181,14 +189,14 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
     scales: {
       x: {
         type: "linear",
-        min: gradientMin,
-        max: gradientMax,
+        min: useDegrees ? gradientToSlopeAngle(gradientMin) : gradientMin,
+        max: useDegrees ? gradientToSlopeAngle(gradientMax) : gradientMax,
         ticks: {
-          callback: (value) => `${(Number(value) * 100).toFixed(0)}%`,
+          callback: (value) => useDegrees ? `${Number(value).toFixed(0)}°` : `${(Number(value) * 100).toFixed(0)}%`,
         },
         title: {
           display: true,
-          text: "Gradient",
+          text: useDegrees ? "Slope Angle" : "Gradient",
           font: {
             weight: 'bold',
           },
@@ -233,7 +241,7 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
     plugins: {
       title: {
         display: true,
-        text: "Gradient Distribution",
+        text: useDegrees ? "Slope Angle Distribution" : "Gradient Distribution",
       },
       legend: {
         display: mappables.length > 1,
@@ -246,8 +254,13 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
         mode: "index" as const,
         filter: (item) => !item.dataset.label?.includes('(histogram)'),
         callbacks: {
-          title: (items) =>
-            items[0]?.parsed?.x != null ? `Gradient: ${(items[0].parsed.x * 100).toFixed(1)}%` : '',
+          title: (items) => {
+            if (items[0]?.parsed?.x == null) return '';
+            const xValue = items[0].parsed.x;
+            return useDegrees 
+              ? `Slope Angle: ${xValue.toFixed(1)}°`
+              : `Gradient: ${(xValue * 100).toFixed(1)}%`;
+          },
           label: (item) =>
             `${item.dataset.label}: ${((1 - (item.parsed.y ?? 0)) * 100).toFixed(1)}% steeper`,
         },

@@ -1,12 +1,14 @@
 "use client";
 
 import { computeDistanceMiles, computeGradient } from "@/lib/geo/geo";
+import { formatSlope, gradientToSlopeAngle } from "@/lib/utils";
 import type { HoverIndexStore } from "@/store";
 import {
   hoverIndexStore as defaultHoverIndexStore,
   gradientStore,
+  slopeUnitStore,
 } from "@/store";
-import type { ChartData, ChartOptions } from "chart.js";
+import type { ChartData, ChartOptions, Plugin } from "chart.js";
 import {
   CategoryScale,
   Chart as ChartJS,
@@ -42,6 +44,7 @@ export default function ElevationChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const { setHoverIndex } = hoverIndexStore();
   const { hoveredGradient, gradientHighlightMode } = gradientStore();
+  const useDegrees = slopeUnitStore((s) => s.useDegrees);
 
   // Resize chart when container size changes (e.g., sidebar toggle)
   useEffect(() => {
@@ -104,6 +107,36 @@ export default function ElevationChart({
   const gradientMax = Math.max(...computedGradients);
   const gradientPadding = (gradientMax - gradientMin) * 0.05;
 
+  // Plugin to draw horizontal line at hovered gradient value
+  const hoverLinePlugin: Plugin<"line"> = {
+    id: 'hoverLine',
+    afterDraw: (chart) => {
+      const activeElements = chart.getActiveElements();
+      if (activeElements.length === 0) return;
+      
+      const index = activeElements[0].index;
+      const gradientDataset = chart.data.datasets[1];
+      const gradientValue = (gradientDataset.data as number[])[index];
+      if (gradientValue === undefined) return;
+      
+      const gradientScale = chart.scales.gradient;
+      const yPixel = gradientScale.getPixelForValue(gradientValue);
+      
+      const ctx = chart.ctx;
+      const chartArea = chart.chartArea;
+      
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, yPixel);
+      ctx.lineTo(chartArea.right, yPixel);
+      ctx.strokeStyle = 'rgba(128, 128, 128, 0.7)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.restore();
+    },
+  };
+
   // Initial chart configuration
   const initialData: ChartData<"line"> = {
     labels: computedDistances,
@@ -121,8 +154,8 @@ export default function ElevationChart({
         tension: 0.1,
       },
       {
-        label: "Gradient (%)",
-        data: computedGradients,
+        label: useDegrees ? "Slope Angle (°)" : "Gradient (%)",
+        data: useDegrees ? computedGradients.map(g => gradientToSlopeAngle(g)) : computedGradients,
         borderColor: "transparent",
         yAxisID: "gradient",
         pointRadius: 0,
@@ -139,7 +172,7 @@ export default function ElevationChart({
             if (gradientValue !== null) {
               if (gradientHighlightMode === 'histogram') {
                 // Histogram mode: highlight only points within the 1% bin
-                const binSize = 0.01;
+                const binSize = useDegrees ? gradientToSlopeAngle(0.01) : 0.01;
                 const binMin = hoveredGradient - binSize / 2;
                 const binMax = hoveredGradient + binSize / 2;
                 isHighlighted = gradientValue >= binMin && gradientValue < binMax;
@@ -206,18 +239,18 @@ export default function ElevationChart({
         type: "linear" as const,
         display: true,
         position: "right" as const,
-        min: gradientMin - gradientPadding,
-        max: gradientMax + gradientPadding,
+        min: useDegrees ? gradientToSlopeAngle(gradientMin - gradientPadding) : gradientMin - gradientPadding,
+        max: useDegrees ? gradientToSlopeAngle(gradientMax + gradientPadding) : gradientMax + gradientPadding,
         title: {
           display: true,
-          text: "Gradient (%)",
+          text: useDegrees ? "Slope Angle (°)" : "Gradient (%)",
           font: {
             weight: 'bold',
           },
         },
         ticks: {
-          stepSize: 0.01,
-          callback: (value) => `${(Number(value) * 100).toFixed(0)}%`,
+          stepSize: useDegrees ? 1 : 0.01,
+          callback: (value) => useDegrees ? `${Number(value).toFixed(0)}°` : `${(Number(value) * 100).toFixed(0)}%`,
         },
         grid: {
           drawOnChartArea: true,
@@ -245,8 +278,13 @@ export default function ElevationChart({
               return `Elevation: ${Math.round(
                 context.parsed.y ?? 0
               ).toLocaleString()} ft`;
-            }if (label === "Gradient (%)") {
-              return `Gradient: ${((context.parsed.y ?? 0) * 100).toFixed(1)}%`;
+            }
+            if (label === "Gradient (%)" || label === "Slope Angle (°)") {
+              const value = context.parsed.y ?? 0;
+              if (useDegrees) {
+                return `Slope Angle: ${value.toFixed(1)}°`;
+              }
+              return `Gradient: ${(value * 100).toFixed(1)}%`;
             }
             return label;
           },
@@ -322,7 +360,7 @@ export default function ElevationChart({
   return (
     <div ref={containerRef} className="h-full w-full" style={{ position: 'relative' }}>
       <div style={{ position: 'absolute', inset: 0 }}>
-        <Line ref={chartRef} data={initialData} options={initialOptions} />
+        <Line ref={chartRef} data={initialData} options={initialOptions} plugins={[hoverLinePlugin]} />
       </div>
     </div>
   );

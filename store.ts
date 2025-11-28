@@ -1,6 +1,6 @@
 import type { Aspect } from "@/components/find-path-button";
 import { type StoreApi, type UseBoundStore, create } from "zustand";
-import { subscribeWithSelector } from "zustand/middleware";
+import { persist, subscribeWithSelector } from "zustand/middleware";
 
 interface HoverIndexState {
   hoverIndex: number;
@@ -18,8 +18,14 @@ interface AspectState {
   setHoveredAspect: (aspect: Aspect | null) => void;
 }
 
+interface SlopeUnitState {
+  useDegrees: boolean;
+  setUseDegrees: (useDegrees: boolean) => void;
+}
+
 export type HoverIndexStore = UseBoundStore<StoreApi<HoverIndexState>>;
 export type GradientStore = UseBoundStore<StoreApi<GradientState>>;
+export type SlopeUnitStore = UseBoundStore<StoreApi<SlopeUnitState>>;
 
 export const createHoverIndexStore = () => create<HoverIndexState>()(
   subscribeWithSelector((set) => ({
@@ -54,3 +60,16 @@ export const createAspectStore = () => create<AspectState>()(
   }))
 );
 export const aspectStore = createAspectStore();
+
+export const createSlopeUnitStore = () => create<SlopeUnitState>()(
+  persist(
+    subscribeWithSelector((set) => ({
+      useDegrees: false,
+      setUseDegrees: (useDegrees) => set({ useDegrees }),
+    })),
+    {
+      name: 'pathfinder-slope-unit',
+    }
+  )
+);
+export const slopeUnitStore = createSlopeUnitStore();

@@ -27,7 +27,8 @@ import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
 import { type Bounds, findCachedAzimuthBoundsContaining, preloadDEM } from "@/lib/dem-cache";
-import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
+import { formatSlope, gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
+import { hoverIndexStore as defaultHoverIndexStore, slopeUnitStore } from "@/store";
 import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
@@ -58,7 +59,7 @@ export default function PathFinderPage() {
   const [mapFitBounds, setMapFitBounds] = useState<Bounds | undefined>();
   const [pathAspects, setPathAspects] = useState<FeatureCollection | null>(null);
   const [aspectRaster, setAspectRaster] = useState<GeoRaster | null>(null);
-  const [maxGradient, setMaxGradient] = useState<number>(0.30);
+  const [maxGradient, setMaxGradient] = useState<number>(0.58);  // ~30° slope angle (tan(30°))
   const [panelOpen, setPanelOpen] = useState(true);
   const [isPortrait, setIsPortrait] = useState(false);
   const [chartsDockOpen, setChartsDockOpen] = useState(true);
@@ -75,6 +76,10 @@ export default function PathFinderPage() {
   const touchStartTime = useRef<number>(0);
   const explorationStartTimeRef = useRef<number>(0);
   const explorationCountRef = useRef<number>(0);
+
+  // Slope unit preference from store
+  const useDegrees = slopeUnitStore((s) => s.useDegrees);
+  const setUseDegrees = slopeUnitStore((s) => s.setUseDegrees);
 
   // Reference to FindPathButton's click handler for keyboard shortcut
   const findPathRef = useRef<HTMLButtonElement>(null);
@@ -95,11 +100,20 @@ export default function PathFinderPage() {
     return () => window.removeEventListener("resize", checkOrientation);
   }, []);
 
+  // Show help on first visit
+  useEffect(() => {
+    const seen = localStorage.getItem("pathfinder-help-seen");
+    if (!seen) {
+      setHelpOpen(true);
+    }
+  }, []);
+
   // Close help panel on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && helpOpen) {
         setHelpOpen(false);
+        localStorage.setItem("pathfinder-help-seen", "true");
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -715,8 +729,8 @@ export default function PathFinderPage() {
                 {/* Gradient slider - full row */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
-                    <span className="text-sm text-muted-foreground">Max Gradient</span>
-                    <span className="text-sm font-medium">{Math.round(maxGradient * 100)}%</span>
+                    <span className="text-sm text-muted-foreground">{useDegrees ? 'Max Slope' : 'Max Gradient'}</span>
+                    <span className="text-sm font-medium">{formatSlope(maxGradient, useDegrees, 0)}</span>
                   </div>
                   <Slider
                     value={[maxGradient]}
@@ -728,9 +742,30 @@ export default function PathFinderPage() {
                   />
                 </div>
 
-                {/* Frontier visualization toggle */}
+                {/* Unit preference toggle */}
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Show Frontier</span>
+                  <span className="text-sm text-muted-foreground">Units</span>
+                  <div className="flex rounded-md border text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setUseDegrees(false)}
+                      className={`px-2 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                    >
+                      %
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUseDegrees(true)}
+                      className={`px-2 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                    >
+                      °
+                    </button>
+                  </div>
+                </div>
+
+                {/* Algorithm animation toggle */}
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Animate</span>
                   <button
                     type="button"
                     onClick={() => setShowFrontier(!showFrontier)}
@@ -824,8 +859,8 @@ export default function PathFinderPage() {
             {/* Max Gradient */}
             <div className="space-y-2">
               <div className="flex justify-between items-center">
-                <span className="text-sm">Max Gradient</span>
-                <span className="text-sm font-medium">{Math.round(maxGradient * 100)}%</span>
+                <span className="text-sm">{useDegrees ? 'Max Slope' : 'Max Gradient'}</span>
+                <span className="text-sm font-medium">{formatSlope(maxGradient, useDegrees, 0)}</span>
               </div>
               <Slider
                 value={[maxGradient]}
@@ -837,9 +872,30 @@ export default function PathFinderPage() {
               />
             </div>
 
-            {/* Frontier visualization toggle */}
+            {/* Unit preference toggle */}
             <div className="flex items-center justify-between">
-              <span className="text-sm">Show Frontier</span>
+              <span className="text-sm">Units</span>
+              <div className="flex rounded-md border text-xs">
+                <button
+                  type="button"
+                  onClick={() => setUseDegrees(false)}
+                  className={`px-2 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                >
+                  %
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseDegrees(true)}
+                  className={`px-2 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                >
+                  °
+                </button>
+              </div>
+            </div>
+
+            {/* Algorithm animation toggle */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">Animate</span>
               <button
                 type="button"
                 onClick={() => setShowFrontier(!showFrontier)}
@@ -1003,7 +1059,10 @@ export default function PathFinderPage() {
             >
               <button
                 type="button"
-                onClick={() => setHelpOpen(false)}
+                onClick={() => {
+                  setHelpOpen(false);
+                  localStorage.setItem("pathfinder-help-seen", "true");
+                }}
                 className="absolute right-2 top-2 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
               >
                 <X className="h-4 w-4" />
