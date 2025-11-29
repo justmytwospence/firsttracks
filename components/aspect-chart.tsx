@@ -8,6 +8,32 @@ import { PolarArea } from 'react-chartjs-2';
 
 ChartJS.register(RadialLinearScale, ArcElement, Tooltip, Legend);
 
+const DIRECTIONS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const;
+const ASPECT_MAP: Record<string, Aspect> = {
+  N: 'north',
+  NE: 'northeast',
+  E: 'east',
+  SE: 'southeast',
+  S: 'south',
+  SW: 'southwest',
+  W: 'west',
+  NW: 'northwest'
+};
+const DIRECTION_TO_INDEX: Record<Aspect, number> = {
+  north: 0,
+  northeast: 1,
+  east: 2,
+  southeast: 3,
+  south: 4,
+  southwest: 5,
+  west: 6,
+  northwest: 7
+};
+
+const NEUTRAL_COLOR = 'rgba(128, 128, 128, 0.5)';
+const HIGHLIGHT_COLOR = 'rgba(255, 165, 0, 0.7)';
+const HIGHLIGHT_BORDER = 'rgba(255, 165, 0, 1)';
+
 export interface AspectChartProps {
   aspectPoints: FeatureCollection;
   excludedAspects?: Aspect[];
@@ -15,7 +41,7 @@ export interface AspectChartProps {
 }
 
 export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: AspectChartProps) {
-  const { setHoveredAspect } = aspectStore();
+  const { setHoveredAspect, hoveredAspect } = aspectStore();
   const [isAspectLocked, setIsAspectLocked] = useState(false);
   const aspects = aspectPoints.features.map(feature => feature.properties?.aspect);
   
@@ -27,39 +53,38 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
       return acc;
     }, {} as Record<string, number>);
 
-    const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    const aspectMap: Record<string, Aspect> = {
-      N: 'north',
-      NE: 'northeast',
-      E: 'east',
-      SE: 'southeast',
-      S: 'south',
-      SW: 'southwest',
-      W: 'west',
-      NW: 'northwest'
-    };
+    const counts = DIRECTIONS.map(dir => aspectCounts[ASPECT_MAP[dir]] || 0);
 
-    const counts = directions.map(dir => aspectCounts[aspectMap[dir]] || 0);
-    const total = counts.reduce((sum, count) => sum + count, 0);
+    // Compute colors based on current hoveredAspect
+    const backgrounds = DIRECTIONS.map((_, i) => {
+      if (hoveredAspect && DIRECTION_TO_INDEX[hoveredAspect] === i) {
+        return HIGHLIGHT_COLOR;
+      }
+      return NEUTRAL_COLOR;
+    });
+    const borders = DIRECTIONS.map((_, i) => {
+      if (hoveredAspect && DIRECTION_TO_INDEX[hoveredAspect] === i) {
+        return HIGHLIGHT_BORDER;
+      }
+      return 'rgba(128, 128, 128, 0.8)';
+    });
+    const borderWidths = DIRECTIONS.map((_, i) => {
+      if (hoveredAspect && DIRECTION_TO_INDEX[hoveredAspect] === i) {
+        return 2;
+      }
+      return 1;
+    });
 
     return {
-      labels: directions,
+      labels: [...DIRECTIONS],
       datasets: [{
         data: counts,
-        backgroundColor: [
-          'rgba(255, 99, 132, 0.7)',
-          'rgba(54, 162, 235, 0.7)',
-          'rgba(255, 206, 86, 0.7)',
-          'rgba(75, 192, 192, 0.7)',
-          'rgba(153, 102, 255, 0.7)',
-          'rgba(255, 159, 64, 0.7)',
-          'rgba(201, 203, 207, 0.7)',
-          'rgba(75, 192, 192, 0.7)'
-        ],
-        borderWidth: 1
+        backgroundColor: backgrounds,
+        borderColor: borders,
+        borderWidth: borderWidths
       }]
     };
-  }, [aspects]);
+  }, [aspects, hoveredAspect]);
 
   const options = {
     responsive: true,
@@ -80,7 +105,22 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
     },
     plugins: {
       tooltip: {
+        displayColors: false,
         callbacks: {
+          title: (context) => {
+            const directionNames: Record<string, string> = {
+              'N': 'North',
+              'NE': 'Northeast',
+              'E': 'East',
+              'SE': 'Southeast',
+              'S': 'South',
+              'SW': 'Southwest',
+              'W': 'West',
+              'NW': 'Northwest'
+            };
+            const label = context[0]?.label || '';
+            return directionNames[label] || label;
+          },
           label: (context) => {
             const total = context.chart.data.datasets[0].data.reduce((a: number, b) => a + (b as number), 0);
             const value = context.raw as number;
@@ -107,17 +147,7 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
       if (elements?.[0]) {
         const index = elements[0].index;
         const direction = chartData.labels[index];
-        const aspectMap: Record<string, Aspect> = {
-          'N': 'north',
-          'NE': 'northeast',
-          'E': 'east',
-          'SE': 'southeast',
-          'S': 'south',
-          'SW': 'southwest',
-          'W': 'west',
-          'NW': 'northwest'
-        };
-        const hoveredAspect = aspectMap[direction];
+        const hoveredAspect = ASPECT_MAP[direction];
         setHoveredAspect(hoveredAspect);
       } else {
         setHoveredAspect(null);
@@ -127,17 +157,7 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
       if (elements?.[0]) {
         const index = elements[0].index;
         const direction = chartData.labels[index];
-        const aspectMap: Record<string, Aspect> = {
-          'N': 'north',
-          'NE': 'northeast',
-          'E': 'east',
-          'SE': 'southeast',
-          'S': 'south',
-          'SW': 'southwest',
-          'W': 'west',
-          'NW': 'northwest'
-        };
-        const clickedAspect = aspectMap[direction];
+        const clickedAspect = ASPECT_MAP[direction];
         
         // Toggle the aspect in excluded list
         if (onAspectClick) {
