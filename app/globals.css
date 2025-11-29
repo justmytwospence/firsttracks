@@ -109,6 +109,11 @@
   z-index: 800 !important;
 }
 
+/* Smooth the aspect raster layer tiles with a subtle blur */
+.leaflet-tile-pane .leaflet-layer canvas.leaflet-tile {
+  filter: blur(1px);
+}
+
 /* Ensure waypoint markers are above path overlays and are draggable */
 .leaflet-marker-pane {
   z-index: 700 !important;
