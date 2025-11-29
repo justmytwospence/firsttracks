@@ -1305,6 +1305,9 @@ export default function PathFinderPage() {
                 <span className="text-muted-foreground">.gpx</span>
               </div>
             </div>
+            <p className="text-xs text-muted-foreground">
+              <strong>Disclaimer:</strong> This tool is for informational purposes only. You are solely responsible for planning safe routes in the backcountry. Always assess current conditions, carry proper safety equipment, and make informed decisions based on your skill level and experience.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setExportDialogOpen(false)}>
