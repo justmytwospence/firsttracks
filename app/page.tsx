@@ -144,6 +144,10 @@ export default function PathFinderPage() {
 	const lastAutoPathfindingCount = useRef<number>(0);
 	const gpxInputRef = useRef<HTMLInputElement>(null);
 
+	// Constants for bounds calculation
+	const BOUNDS_PADDING_FACTOR = 0.1;
+	const MIN_BOUNDS_PADDING = 0.01;
+
 	// Handle state loaded from URL (for shareable links)
 	const handleStateFromUrl = useCallback((urlState: Partial<UrlState>) => {
 		if (urlState.waypoints && urlState.waypoints.length > 0) {
@@ -162,9 +166,15 @@ export default function PathFinderPage() {
 			const minLat = Math.min(...lats);
 			const maxLat = Math.max(...lats);
 
-			// Add padding (10% on each side)
-			const lonPadding = Math.max((maxLon - minLon) * 0.1, 0.01);
-			const latPadding = Math.max((maxLat - minLat) * 0.1, 0.01);
+			// Add padding on each side
+			const lonPadding = Math.max(
+				(maxLon - minLon) * BOUNDS_PADDING_FACTOR,
+				MIN_BOUNDS_PADDING,
+			);
+			const latPadding = Math.max(
+				(maxLat - minLat) * BOUNDS_PADDING_FACTOR,
+				MIN_BOUNDS_PADDING,
+			);
 
 			const urlBounds: Bounds = {
 				north: maxLat + latPadding,

@@ -16,6 +16,10 @@ const PARAM_PATH = "p";
 const PARAM_MAX_GRADIENT = "g";
 const PARAM_EXCLUDED_ASPECTS = "a";
 
+// Configuration constants
+const MAX_GRADIENT_PRECISION = 2;
+const URL_STATE_SYNC_DELAY_MS = 100;
+
 // Aspect abbreviations for compact URL encoding
 const ASPECT_ABBREVIATIONS: Record<Aspect, string> = {
 	north: "n",
@@ -141,9 +145,12 @@ export function serializeUrlState(state: Partial<UrlState>): URLSearchParams {
 		params.set(PARAM_PATH, encodeCoordinates(coords));
 	}
 
-	// Encode max gradient (round to 2 decimal places)
+	// Encode max gradient
 	if (state.maxGradient !== undefined) {
-		params.set(PARAM_MAX_GRADIENT, state.maxGradient.toFixed(2));
+		params.set(
+			PARAM_MAX_GRADIENT,
+			state.maxGradient.toFixed(MAX_GRADIENT_PRECISION),
+		);
 	}
 
 	// Encode excluded aspects
@@ -191,10 +198,10 @@ export function useUrlState({
 			if (Object.keys(urlState).length > 0) {
 				isUpdatingFromUrlRef.current = true;
 				onStateFromUrl(urlState);
-				// Reset flag after a short delay to allow state updates to propagate
+				// Reset flag after delay to allow state updates to propagate
 				setTimeout(() => {
 					isUpdatingFromUrlRef.current = false;
-				}, 100);
+				}, URL_STATE_SYNC_DELAY_MS);
 			}
 		}
 	}, [onStateFromUrl]);
@@ -243,10 +250,14 @@ export function useUrlState({
 
 		const state: Partial<UrlState> = {
 			waypoints,
-			path: path ?? undefined,
 			maxGradient,
 			excludedAspects,
 		};
+
+		// Only include path if it exists
+		if (path) {
+			state.path = path;
+		}
 
 		const params = serializeUrlState(state);
 		const search = params.toString();
