@@ -47,6 +47,7 @@ export default function LeafletRasterLayer({
   useEffect(() => {
     geoRasterLayerRef.current = new GeoRasterLayer({
       georaster: aspectRaster,
+      resolution: 256,
       updateWhenZooming: false,
       pixelValuesToColorFn: (values) => {
         const azimuth = values[0];
