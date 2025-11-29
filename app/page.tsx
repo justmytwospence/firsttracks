@@ -26,6 +26,7 @@ import {
 import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
+import { type UrlState, useUrlState } from "@/hooks/useUrlState";
 import {
 	type Bounds,
 	findCachedAzimuthBoundsContaining,
@@ -54,6 +55,7 @@ import {
 	Mountain,
 	RotateCcw,
 	Route,
+	Share2,
 	TrendingUp,
 	Undo2,
 	Upload,
@@ -62,6 +64,7 @@ import {
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SiBuymeacoffee, SiGithub } from "react-icons/si";
+import { toast } from "sonner";
 
 const parseGeoraster = require("georaster");
 
@@ -140,6 +143,65 @@ export default function PathFinderPage() {
 	const markerDragEndTimeRef = useRef<number>(0);
 	const lastAutoPathfindingCount = useRef<number>(0);
 	const gpxInputRef = useRef<HTMLInputElement>(null);
+
+	// Handle state loaded from URL (for shareable links)
+	const handleStateFromUrl = useCallback((urlState: Partial<UrlState>) => {
+		if (urlState.waypoints && urlState.waypoints.length > 0) {
+			setWaypoints(urlState.waypoints);
+			// Generate IDs for URL-loaded waypoints
+			const ids = urlState.waypoints.map(() => nextWaypointIdRef.current++);
+			setWaypointIds(ids);
+			// Prevent auto-pathfinding from triggering
+			lastAutoPathfindingCount.current = urlState.waypoints.length;
+
+			// Compute bounds from waypoints for map fitting
+			const lons = urlState.waypoints.map((wp) => wp.coordinates[0]);
+			const lats = urlState.waypoints.map((wp) => wp.coordinates[1]);
+			const minLon = Math.min(...lons);
+			const maxLon = Math.max(...lons);
+			const minLat = Math.min(...lats);
+			const maxLat = Math.max(...lats);
+
+			// Add padding (10% on each side)
+			const lonPadding = Math.max((maxLon - minLon) * 0.1, 0.01);
+			const latPadding = Math.max((maxLat - minLat) * 0.1, 0.01);
+
+			const urlBounds: Bounds = {
+				north: maxLat + latPadding,
+				south: minLat - latPadding,
+				east: maxLon + lonPadding,
+				west: minLon - lonPadding,
+			};
+
+			// Set map to fit the waypoints/path bounds
+			setMapFitBounds(urlBounds);
+			setCachedBounds(urlBounds);
+		}
+
+		if (urlState.path) {
+			setPath(urlState.path);
+			// Don't show help for shared links since user is viewing existing route
+			setHelpOpen(false);
+			localStorage.setItem("pathfinder-help-seen", "true");
+		}
+
+		if (urlState.maxGradient !== undefined) {
+			setMaxGradient(urlState.maxGradient);
+		}
+
+		if (urlState.excludedAspects) {
+			setExcludedAspects(urlState.excludedAspects);
+		}
+	}, []);
+
+	// URL state synchronization for shareable links
+	const { getShareableUrl } = useUrlState({
+		waypoints,
+		path,
+		maxGradient,
+		excludedAspects,
+		onStateFromUrl: handleStateFromUrl,
+	});
 
 	// Detect portrait vs landscape orientation
 	useEffect(() => {
@@ -640,6 +702,18 @@ export default function PathFinderPage() {
 		setExportDialogOpen(false);
 	};
 
+	// Copy shareable URL to clipboard
+	const handleShare = useCallback(async () => {
+		const url = getShareableUrl();
+		try {
+			await navigator.clipboard.writeText(url);
+			toast.success("Link copied to clipboard");
+		} catch (err) {
+			// Fallback for browsers without clipboard API
+			toast.error("Failed to copy link");
+		}
+	}, [getShareableUrl]);
+
 	const handleImportGpx = useCallback(
 		async (event: React.ChangeEvent<HTMLInputElement>) => {
 			const file = event.target.files?.[0];
@@ -842,6 +916,15 @@ export default function PathFinderPage() {
 										onClick={() => setExportDialogOpen(true)}
 									>
 										<Download className="h-4 w-4" />
+									</Button>
+									<Button
+										variant="outline"
+										size="icon"
+										className="shrink-0 h-10 w-10"
+										disabled={waypoints.length === 0}
+										onClick={handleShare}
+									>
+										<Share2 className="h-4 w-4" />
 									</Button>
 								</div>
 
@@ -1111,6 +1194,16 @@ export default function PathFinderPage() {
 									Export
 								</Button>
 							</div>
+							<Button
+								variant="outline"
+								size="sm"
+								disabled={waypoints.length === 0}
+								onClick={handleShare}
+								className="w-full"
+							>
+								<Share2 className="h-4 w-4 mr-1" />
+								Share Link
+							</Button>
 						</div>
 
 						{/* Excluded Aspects - above aspect chart */}
