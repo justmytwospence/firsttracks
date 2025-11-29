@@ -46,6 +46,22 @@ function getAspectIntensity(aspect: Aspect, azimuth: number): number {
   return 0;
 }
 
+// Get interpolation parameters for a raster position
+function getInterpolationParams(
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): { x0: number; y0: number; x1: number; y1: number; xFrac: number; yFrac: number } {
+  const x0 = Math.max(0, Math.min(width - 2, Math.floor(x)));
+  const y0 = Math.max(0, Math.min(height - 2, Math.floor(y)));
+  const x1 = Math.min(width - 1, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const xFrac = x - x0;
+  const yFrac = y - y0;
+  return { x0, y0, x1, y1, xFrac, yFrac };
+}
+
 // Bilinear interpolation for smooth sampling between raster pixels
 function bilinearInterpolate(
   values: number[][],
@@ -54,15 +70,7 @@ function bilinearInterpolate(
   width: number,
   height: number
 ): number {
-  // Clamp coordinates to valid range
-  const x0 = Math.max(0, Math.min(width - 2, Math.floor(x)));
-  const y0 = Math.max(0, Math.min(height - 2, Math.floor(y)));
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  
-  // Get fractional parts
-  const xFrac = x - x0;
-  const yFrac = y - y0;
+  const { x0, y0, x1, y1, xFrac, yFrac } = getInterpolationParams(x, y, width, height);
   
   // Get the four surrounding values
   const v00 = values[y0]?.[x0] ?? 0;
@@ -74,6 +82,52 @@ function bilinearInterpolate(
   const v0 = v00 * (1 - xFrac) + v10 * xFrac;
   const v1 = v01 * (1 - xFrac) + v11 * xFrac;
   return v0 * (1 - yFrac) + v1 * yFrac;
+}
+
+// Compute aspect intensity with bilinear interpolation of intensities (not azimuths)
+// This avoids artifacts from interpolating circular azimuth values
+function getInterpolatedAspectIntensity(
+  azimuthValues: number[][],
+  gradientValues: number[][],
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  excludedAspects: Aspect[]
+): { intensity: number; gradient: number } {
+  const { x0, y0, x1, y1, xFrac, yFrac } = getInterpolationParams(x, y, width, height);
+  
+  // Get azimuth and gradient values at four corners
+  const az00 = azimuthValues[y0]?.[x0] ?? 0;
+  const az10 = azimuthValues[y0]?.[x1] ?? 0;
+  const az01 = azimuthValues[y1]?.[x0] ?? 0;
+  const az11 = azimuthValues[y1]?.[x1] ?? 0;
+  
+  const gr00 = Math.abs(gradientValues[y0]?.[x0] ?? 0);
+  const gr10 = Math.abs(gradientValues[y0]?.[x1] ?? 0);
+  const gr01 = Math.abs(gradientValues[y1]?.[x0] ?? 0);
+  const gr11 = Math.abs(gradientValues[y1]?.[x1] ?? 0);
+  
+  // Compute intensity at each corner (for all excluded aspects)
+  let int00 = 0, int10 = 0, int01 = 0, int11 = 0;
+  for (const aspect of excludedAspects) {
+    int00 = Math.max(int00, getAspectIntensity(aspect, az00));
+    int10 = Math.max(int10, getAspectIntensity(aspect, az10));
+    int01 = Math.max(int01, getAspectIntensity(aspect, az01));
+    int11 = Math.max(int11, getAspectIntensity(aspect, az11));
+  }
+  
+  // Bilinearly interpolate the intensities (not the azimuths!)
+  const int0 = int00 * (1 - xFrac) + int10 * xFrac;
+  const int1 = int01 * (1 - xFrac) + int11 * xFrac;
+  const intensity = int0 * (1 - yFrac) + int1 * yFrac;
+  
+  // Also interpolate gradient for opacity calculation
+  const gr0 = gr00 * (1 - xFrac) + gr10 * xFrac;
+  const gr1 = gr01 * (1 - xFrac) + gr11 * xFrac;
+  const gradient = gr0 * (1 - yFrac) + gr1 * yFrac;
+  
+  return { intensity, gradient };
 }
 
 interface LeafletRasterLayerProps {
@@ -191,21 +245,21 @@ class SmoothRasterOverlay extends L.Layer {
           continue;
         }
 
-        // Use bilinear interpolation for smooth sampling
-        const azimuth = bilinearInterpolate(azimuthValues, rasterX, rasterY, width, height);
-        const gradient = Math.abs(bilinearInterpolate(gradientValues, rasterX, rasterY, width, height));
+        // Use bilinear interpolation of intensities (not raw azimuths) for smooth results
+        const { intensity, gradient } = getInterpolatedAspectIntensity(
+          azimuthValues,
+          gradientValues,
+          rasterX,
+          rasterY,
+          width,
+          height,
+          this.excludedAspects
+        );
 
-        // Calculate the maximum intensity across all excluded aspects
-        let maxIntensity = 0;
-        for (const excludedAspect of this.excludedAspects) {
-          const intensity = getAspectIntensity(excludedAspect, azimuth);
-          maxIntensity = Math.max(maxIntensity, intensity);
-        }
-
-        if (maxIntensity > 0) {
+        if (intensity > 0) {
           // Apply gradient-based opacity with smooth falloff from aspect boundaries
           const baseOpacity = Math.min(gradient * 0.4, 0.8);
-          const opacity = baseOpacity * maxIntensity;
+          const opacity = baseOpacity * intensity;
 
           const pixelIndex = (screenY * size.x + screenX) * 4;
           data[pixelIndex] = 255;     // Red
