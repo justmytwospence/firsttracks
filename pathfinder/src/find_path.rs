@@ -288,7 +288,8 @@ pub fn find_path_rs(
         let aspect_gradient: f64 = gradients[ny][nx];
         if aspect_gradient > aspect_gradient_threshold {
           for aspect in &excluded_aspects {
-            if aspect.contains_azimuth(azimuth, Some(2.5)) {
+            // Use 22.5° tolerance to also exclude half of adjacent aspects
+            if aspect.contains_azimuth(azimuth, Some(22.5)) {
               break 'neighbors;
             }
           }

@@ -27,7 +27,8 @@ const DIRECTION_TO_INDEX: Record<Aspect, number> = {
   south: 4,
   southwest: 5,
   west: 6,
-  northwest: 7
+  northwest: 7,
+  flat: -1
 };
 
 const NEUTRAL_COLOR = 'rgba(128, 128, 128, 0.5)';
