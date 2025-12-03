@@ -519,6 +519,14 @@ pub fn compute_azimuths_from_array(
     )));
   }
   
+  // Validate minimum dimensions for 5x5 kernel (need at least 5x5)
+  if width < 5 || height < 5 {
+    return Err(JsValue::from_str(&format!(
+      "Elevation grid too small: {}x{}, minimum is 5x5 for Sobel filtering",
+      width, height
+    )));
+  }
+  
   // Parse excluded aspects from JS value
   let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
     vec![]

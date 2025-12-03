@@ -83,6 +83,7 @@ export function getTilesForBounds(bounds: Bounds, zoom: number): { x: number; y:
 /**
  * Decode Terrarium format PNG elevation data.
  * Formula: elevation = (red * 256 + green + blue / 256) - 32768
+ * Note: JS operator precedence means this is evaluated as: ((red * 256) + green + (blue / 256)) - 32768
  * Returns elevation values in meters as Float32Array.
  */
 export function decodeTerrarium(imageData: ImageData): Float32Array {
