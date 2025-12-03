@@ -33,7 +33,7 @@ export interface AzimuthsResult {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
-  runout_zones: Uint8Array;
+  runout_zones?: Uint8Array;
 }
 
 interface PendingRequest {
