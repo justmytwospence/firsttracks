@@ -123,16 +123,80 @@ fn compute_gradient_along_azimuth(gx: f64, gy: f64, azimuth: f64) -> f64 {
   ((gx_normalized * gx_normalized) + (gy_normalized * gy_normalized)).sqrt()
 }
 
-/// Compute avalanche runout zones by following steepest descent from source zones.
-/// Source zones are pixels with gradient >= BETA_THRESHOLD (10° ≈ 0.176 rise/run) AND
-/// aspect in excluded_aspects. Runout propagates downhill until gradient drops below threshold.
+/// Compute D8 flow directions for each cell.
+/// Returns a 2D array where each value encodes the direction to the steepest downhill neighbor:
+///   0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 255=flat/sink (no downhill neighbor)
+fn compute_d8_flow_directions(elevations: &Vec<Vec<f64>>) -> Vec<Vec<u8>> {
+  let height = elevations.len();
+  let width = elevations[0].len();
+  
+  let mut flow_dir: Vec<Vec<u8>> = vec![vec![255; width]; height];
+  
+  // D8 neighbor offsets: (dy, dx) for directions 0-7
+  // Direction encoding: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+  const D8_OFFSETS: [(isize, isize); 8] = [
+    (-1, 0),  // 0: N
+    (-1, 1),  // 1: NE
+    (0, 1),   // 2: E
+    (1, 1),   // 3: SE
+    (1, 0),   // 4: S
+    (1, -1),  // 5: SW
+    (0, -1),  // 6: W
+    (-1, -1), // 7: NW
+  ];
+  
+  // Distance weights for diagonal vs cardinal (sqrt(2) vs 1)
+  const D8_WEIGHTS: [f64; 8] = [1.0, 1.414, 1.0, 1.414, 1.0, 1.414, 1.0, 1.414];
+  
+  for i in 1..(height - 1) {
+    for j in 1..(width - 1) {
+      let center_elev = elevations[i][j];
+      let mut steepest_slope = 0.0;
+      let mut steepest_dir: u8 = 255;
+      
+      for (dir, &(dy, dx)) in D8_OFFSETS.iter().enumerate() {
+        let ny = (i as isize + dy) as usize;
+        let nx = (j as isize + dx) as usize;
+        
+        let neighbor_elev = elevations[ny][nx];
+        let drop = center_elev - neighbor_elev;
+        
+        if drop > 0.0 {
+          // Slope = drop / distance (accounting for diagonal distance)
+          let slope = drop / D8_WEIGHTS[dir];
+          if slope > steepest_slope {
+            steepest_slope = slope;
+            steepest_dir = dir as u8;
+          }
+        }
+      }
+      
+      flow_dir[i][j] = steepest_dir;
+    }
+  }
+  
+  flow_dir
+}
+
+/// Compute avalanche runout zones using D8 flow routing.
+/// Source zones are steep pixels (gradient >= threshold) with aspect in excluded_aspects.
+/// Returns intensity values (0.0-1.0) that fade with distance from source zones.
+/// Runout zones are the FLAT areas (<10°) below source zones where debris comes to rest.
 fn compute_runout_zones(
   elevations: &Vec<Vec<f64>>,
   azimuths: &Vec<Vec<f64>>,
   gradients: &Vec<Vec<f64>>,
   excluded_aspects: &[Aspect],
 ) -> Vec<Vec<f64>> {
-  const BETA_THRESHOLD: f64 = 0.176; // tan(10°) - the beta point where debris typically stops
+  // Minimum gradient to be considered a potential avalanche start zone (~10° slope)
+  // This matches where red aspect shading stops
+  const START_ZONE_THRESHOLD: f64 = 0.176; // tan(10°)
+  // Maximum cells to mark as runout on flat terrain
+  const MAX_RUNOUT_CELLS: usize = 50;
+  // Starting intensity for runout zones (will fade with distance)
+  const INITIAL_INTENSITY: f64 = 1.0;
+  // Decay rate per cell on flat terrain (faster decay since terrain is flat)
+  const DECAY_RATE: f64 = 0.92;
 
   let height = elevations.len();
   let width = elevations[0].len();
@@ -144,20 +208,30 @@ fn compute_runout_zones(
     return runout;
   }
   
-  // Directions for 8-connected neighbors
-  const DIRECTIONS: [(isize, isize); 8] = [
-    (0, 1), (1, 0), (0, -1), (-1, 0),
-    (1, 1), (1, -1), (-1, -1), (-1, 1),
+  // Compute D8 flow directions
+  let flow_dir = compute_d8_flow_directions(elevations);
+  
+  // D8 neighbor offsets matching direction encoding
+  const D8_OFFSETS: [(isize, isize); 8] = [
+    (-1, 0),  // 0: N
+    (-1, 1),  // 1: NE
+    (0, 1),   // 2: E
+    (1, 1),   // 3: SE
+    (1, 0),   // 4: S
+    (1, -1),  // 5: SW
+    (0, -1),  // 6: W
+    (-1, -1), // 7: NW
   ];
   
-  // For each pixel, check if it's a source zone
+  // Find all source zone cells and propagate runout from each
+  // Also mark source zone cells with low-intensity runout to blend with red shading
   for i in 1..(height - 1) {
     for j in 1..(width - 1) {
       let gradient = gradients[i][j];
       let azimuth = azimuths[i][j];
       
-      // Skip if gradient is below threshold
-      if gradient < BETA_THRESHOLD {
+      // Must be steep enough to be an avalanche start zone
+      if gradient < START_ZONE_THRESHOLD {
         continue;
       }
       
@@ -174,48 +248,122 @@ fn compute_runout_zones(
         continue;
       }
       
-      // This is a source zone - follow steepest descent to mark runout BELOW it
-      // Note: The source zone itself is NOT marked as runout (it shows as red aspect shading)
+      // Mark source zone cells near the 10° threshold with fading runout
+      // to create a smooth blend between red aspect shading and amber runout
+      // The closer to 10° threshold, the more runout blending we apply
+      let blend_range = 0.35 - START_ZONE_THRESHOLD; // ~10° to ~20° range for blending
+      let gradient_above_threshold = gradient - START_ZONE_THRESHOLD;
+      if gradient_above_threshold < blend_range {
+        let blend_factor = 1.0 - (gradient_above_threshold / blend_range);
+        let edge_intensity = blend_factor * 0.5; // Max 50% intensity at the 10° edge
+        runout[i][j] = runout[i][j].max(edge_intensity);
+      }
+      
+      // This is a source zone - follow D8 flow and mark runout with fading intensity
       let mut current_y = i;
       let mut current_x = j;
+      let mut runout_cells = 0;
+      let mut current_intensity = INITIAL_INTENSITY;
       
+      // Follow flow and mark runout starting from first cell after source
       loop {
-        // Find neighbor with lowest elevation
-        let mut min_elevation = elevations[current_y][current_x];
-        let mut next_y = current_y;
-        let mut next_x = current_x;
+        let dir = flow_dir[current_y][current_x];
         
-        for &(dy, dx) in DIRECTIONS.iter() {
-          let ny = (current_y as isize + dy) as usize;
-          let nx = (current_x as isize + dx) as usize;
-          
-          if ny < height && nx < width {
-            let neighbor_elevation = elevations[ny][nx];
-            if neighbor_elevation < min_elevation {
-              min_elevation = neighbor_elevation;
-              next_y = ny;
-              next_x = nx;
+        // Stop if this is a sink (no downhill flow)
+        if dir == 255 {
+          break;
+        }
+        
+        // Move to next cell following flow direction
+        let (dy, dx) = D8_OFFSETS[dir as usize];
+        let next_y = (current_y as isize + dy) as usize;
+        let next_x = (current_x as isize + dx) as usize;
+        
+        // Bounds check
+        if next_y == 0 || next_y >= height - 1 || next_x == 0 || next_x >= width - 1 {
+          break;
+        }
+        
+        current_y = next_y;
+        current_x = next_x;
+        runout_cells += 1;
+        
+        // Decay intensity with distance
+        current_intensity *= DECAY_RATE;
+        
+        // Don't mark cells that are themselves steep excluded-aspect source zones (they show as red)
+        let next_gradient = gradients[current_y][current_x];
+        let next_azimuth = azimuths[current_y][current_x];
+        let mut next_is_source = false;
+        if next_gradient >= START_ZONE_THRESHOLD {
+          for aspect in excluded_aspects {
+            if aspect.contains_azimuth(next_azimuth, Some(22.5)) {
+              next_is_source = true;
+              break;
             }
           }
         }
         
-        // If no lower neighbor found, stop
-        if next_y == current_y && next_x == current_x {
-          break;
+        // Only mark as runout if it's not a source zone itself (source zones show as red)
+        // Use max to accumulate intensity from multiple flow paths
+        if !next_is_source {
+          runout[current_y][current_x] = runout[current_y][current_x].max(current_intensity);
         }
         
-        // Move to next cell and mark it as runout
-        current_y = next_y;
-        current_x = next_x;
-        runout[current_y][current_x] = 1.0;
-        
-        // If this cell's gradient is below threshold, stop (reached beta point)
-        // We still marked it as runout since debris would reach here
-        if gradients[current_y][current_x] < BETA_THRESHOLD {
+        // Stop conditions:
+        // 1. Traveled max distance
+        // 2. Intensity has faded too much
+        // Note: We continue on flat terrain - runout extends until it fades out
+        if runout_cells >= MAX_RUNOUT_CELLS {
+          break;
+        }
+        if current_intensity < 0.05 {
           break;
         }
       }
     }
+  }
+  
+  // Lateral spreading pass: expand runout zones to fill gaps between D8 flow paths
+  // This simulates debris spreading laterally as it flows downhill
+  const SPREAD_ITERATIONS: usize = 2;
+  const SPREAD_DECAY: f64 = 0.7; // Intensity multiplier for spread cells
+  
+  for _ in 0..SPREAD_ITERATIONS {
+    let mut spread_runout = runout.clone();
+    
+    for i in 1..(height - 1) {
+      for j in 1..(width - 1) {
+        if runout[i][j] > 0.0 {
+          // Spread to 4-connected neighbors (not diagonal, to avoid over-spreading)
+          let neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)];
+          
+          for &(ny, nx) in &neighbors {
+            if ny > 0 && ny < height - 1 && nx > 0 && nx < width - 1 {
+              // Don't spread into steep excluded-aspect source zones (they show as red)
+              let neighbor_gradient = gradients[ny][nx];
+              let neighbor_azimuth = azimuths[ny][nx];
+              let mut is_source = false;
+              if neighbor_gradient >= START_ZONE_THRESHOLD {
+                for aspect in excluded_aspects {
+                  if aspect.contains_azimuth(neighbor_azimuth, Some(22.5)) {
+                    is_source = true;
+                    break;
+                  }
+                }
+              }
+              
+              if !is_source {
+                let spread_intensity = runout[i][j] * SPREAD_DECAY;
+                spread_runout[ny][nx] = spread_runout[ny][nx].max(spread_intensity);
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    runout = spread_runout;
   }
   
   runout

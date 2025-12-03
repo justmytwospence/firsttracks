@@ -41,29 +41,37 @@ export default function LeafletPathfindingLayer({
   const map = useMap();
   const [userLocation, setUserLocation] = useState<[number, number] | null>(
     () => {
+      // Only read from localStorage synchronously in the initializer
       const savedUserLocation = localStorage.getItem("userLocation");
       if (savedUserLocation) {
         return JSON.parse(savedUserLocation);
       }
-      if (navigator?.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const location: [number, number] = [
-              position.coords.latitude,
-              position.coords.longitude,
-            ];
-            localStorage.setItem("userLocation", JSON.stringify(location));
-            setUserLocation(location);
-          },
-          (error) => {
-            // User denied permission or geolocation unavailable - not a critical error
-            baseLogger.warn("Geolocation unavailable:", error.message || "Permission denied or not supported");
-          }
-        );
-      }
       return null;
     }
   );
+
+  // Fetch geolocation asynchronously in useEffect
+  useEffect(() => {
+    // Only fetch if we don't already have a location
+    if (userLocation) return;
+    
+    if (navigator?.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const location: [number, number] = [
+            position.coords.latitude,
+            position.coords.longitude,
+          ];
+          localStorage.setItem("userLocation", JSON.stringify(location));
+          setUserLocation(location);
+        },
+        (error) => {
+          // User denied permission or geolocation unavailable - not a critical error
+          baseLogger.warn("Geolocation unavailable:", error.message || "Permission denied or not supported");
+        }
+      );
+    }
+  }, [userLocation]);
 
   const prevMapCenterRef = useRef<LatLngExpression | undefined>(mapCenter);
   const prevFitBoundsRef = useRef<Bounds | undefined>(fitBounds);

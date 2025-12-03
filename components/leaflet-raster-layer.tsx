@@ -133,6 +133,7 @@ function getInterpolatedAspectIntensity(
 interface LeafletRasterLayerProps {
   aspectRaster: GeoRaster;
   excludedAspects: Aspect[];
+  avoidRunoutZones?: boolean;
 }
 
 // Custom Leaflet layer class for smooth raster rendering
@@ -140,18 +141,23 @@ class SmoothRasterOverlay extends L.Layer {
   private canvas: HTMLCanvasElement | null = null;
   private raster: GeoRaster;
   private excludedAspects: Aspect[];
+  private avoidRunoutZones: boolean;
   private animationFrameId: number | null = null;
+  private static readonly FADE_DURATION = 300; // ms
 
-  constructor(raster: GeoRaster, excludedAspects: Aspect[]) {
+  constructor(raster: GeoRaster, excludedAspects: Aspect[], avoidRunoutZones = true) {
     super();
     this.raster = raster;
     this.excludedAspects = excludedAspects;
+    this.avoidRunoutZones = avoidRunoutZones;
   }
 
   onAdd(map: L.Map): this {
     this.canvas = L.DomUtil.create('canvas', 'leaflet-smooth-raster-layer') as HTMLCanvasElement;
     this.canvas.style.position = 'absolute';
     this.canvas.style.pointerEvents = 'none';
+    this.canvas.style.transition = `opacity ${SmoothRasterOverlay.FADE_DURATION}ms ease-in-out`;
+    this.canvas.style.opacity = '0';
     
     const pane = map.getPane('overlayPane');
     if (pane) {
@@ -163,6 +169,14 @@ class SmoothRasterOverlay extends L.Layer {
     map.on('resize', this.redraw, this);
 
     this.redraw();
+    
+    // Trigger fade in after canvas is added to DOM
+    requestAnimationFrame(() => {
+      if (this.canvas) {
+        this.canvas.style.opacity = '1';
+      }
+    });
+    
     return this;
   }
 
@@ -170,17 +184,32 @@ class SmoothRasterOverlay extends L.Layer {
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
     }
-    if (this.canvas && this.canvas.parentNode) {
-      this.canvas.parentNode.removeChild(this.canvas);
-    }
+    
     map.off('moveend', this.redraw, this);
     map.off('zoomend', this.redraw, this);
     map.off('resize', this.redraw, this);
+    
+    // Fade out before removing from DOM
+    if (this.canvas && this.canvas.parentNode) {
+      this.canvas.style.opacity = '0';
+      const canvas = this.canvas;
+      setTimeout(() => {
+        if (canvas.parentNode) {
+          canvas.parentNode.removeChild(canvas);
+        }
+      }, SmoothRasterOverlay.FADE_DURATION);
+    }
+    
     return this;
   }
 
   updateExcludedAspects(excludedAspects: Aspect[]): void {
     this.excludedAspects = excludedAspects;
+    this.redraw();
+  }
+
+  updateAvoidRunoutZones(avoidRunoutZones: boolean): void {
+    this.avoidRunoutZones = avoidRunoutZones;
     this.redraw();
   }
 
@@ -248,15 +277,19 @@ class SmoothRasterOverlay extends L.Layer {
 
         const pixelIndex = (screenY * size.x + screenX) * 4;
         
-        // Check for runout zone first (renders in amber/orange)
+        // Check for runout zone first (renders in amber/orange with intensity-based alpha)
         if (runoutValues) {
-          const runoutValue = bilinearInterpolate(runoutValues, rasterX, rasterY, width, height);
-          if (runoutValue > 0.5) {
-            // Runout zone - render in amber (rgba(245, 158, 11, 0.5))
+          const runoutIntensity = bilinearInterpolate(runoutValues, rasterX, rasterY, width, height);
+          if (runoutIntensity > 0.005) {
+            // Runout zone - render in amber with intensity-based alpha
+            // Dim when not being avoided in pathfinding (visual feedback)
+            const opacityMultiplier = this.avoidRunoutZones ? 1.0 : 0.35;
+            const alpha = Math.min(runoutIntensity * 0.8, 0.7) * opacityMultiplier;
+            
             data[pixelIndex] = 245;     // Red
             data[pixelIndex + 1] = 158; // Green
             data[pixelIndex + 2] = 11;  // Blue
-            data[pixelIndex + 3] = Math.round(0.5 * 255); // Alpha (50%)
+            data[pixelIndex + 3] = Math.round(alpha * 255);
             continue; // Skip aspect rendering for runout pixels
           }
         }
@@ -272,9 +305,14 @@ class SmoothRasterOverlay extends L.Layer {
           this.excludedAspects
         );
 
-        if (intensity > 0) {
+        // Only show red shading for slopes >= 10° (tan(10°) ≈ 0.176)
+        // Flatter terrain below this threshold shows as runout (amber) instead
+        const RED_GRADIENT_THRESHOLD = 0.176;
+        
+        if (intensity > 0 && gradient >= RED_GRADIENT_THRESHOLD) {
           // Apply gradient-based opacity with smooth falloff from aspect boundaries
-          const baseOpacity = Math.min(gradient * 0.4, 0.8);
+          // Use higher minimum opacity to prevent gaps at lower gradients
+          const baseOpacity = Math.max(0.25, Math.min(gradient * 0.5, 0.8));
           const opacity = baseOpacity * intensity;
 
           data[pixelIndex] = 255;     // Red
@@ -292,18 +330,19 @@ class SmoothRasterOverlay extends L.Layer {
 export default function LeafletRasterLayer({
   aspectRaster,
   excludedAspects,
+  avoidRunoutZones = true,
 }: LeafletRasterLayerProps) {
   const map = useMap();
   const layerRef = useRef<SmoothRasterOverlay | null>(null);
 
   useEffect(() => {
-    layerRef.current = new SmoothRasterOverlay(aspectRaster, excludedAspects);
+    layerRef.current = new SmoothRasterOverlay(aspectRaster, excludedAspects, avoidRunoutZones);
     layerRef.current.addTo(map);
 
     return () => {
       layerRef.current?.remove();
     };
-  }, [aspectRaster, map]);
+  }, [aspectRaster, map, excludedAspects, avoidRunoutZones]);
 
   // Update excluded aspects without recreating the layer
   useEffect(() => {
@@ -311,6 +350,13 @@ export default function LeafletRasterLayer({
       layerRef.current.updateExcludedAspects(excludedAspects);
     }
   }, [excludedAspects]);
+
+  // Update avoidRunoutZones without recreating the layer
+  useEffect(() => {
+    if (layerRef.current) {
+      layerRef.current.updateAvoidRunoutZones(avoidRunoutZones);
+    }
+  }, [avoidRunoutZones]);
 
   return null;
 }

@@ -145,14 +145,33 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     
     console.log('[Worker] Calling find_path_rs with:', {
       elevationsBufferLength: elevationsBuffer.length,
+      elevationsBufferByteLength: elevationsBuffer.byteLength,
+      elevationsBufferDetached: elevationsBuffer.buffer.byteLength === 0,
       azimuthsBufferLength: azimuthsBuffer.length,
+      azimuthsBufferDetached: azimuthsBuffer.buffer.byteLength === 0,
       gradientsBufferLength: gradientsBuffer.length,
+      gradientsBufferDetached: gradientsBuffer.buffer.byteLength === 0,
       runoutZonesBufferLength: runoutZonesBuffer?.length,
+      runoutZonesBufferDetached: runoutZonesBuffer ? runoutZonesBuffer.buffer.byteLength === 0 : 'N/A',
       startGeoJson,
       endGeoJson,
       excludedAspects,
       explorationBatchSize
     });
+    
+    // Validate buffers aren't detached
+    if (elevationsBuffer.buffer.byteLength === 0) {
+      throw new Error('elevationsBuffer is detached');
+    }
+    if (azimuthsBuffer.buffer.byteLength === 0) {
+      throw new Error('azimuthsBuffer is detached');
+    }
+    if (gradientsBuffer.buffer.byteLength === 0) {
+      throw new Error('gradientsBuffer is detached');
+    }
+    if (runoutZonesBuffer && runoutZonesBuffer.buffer.byteLength === 0) {
+      throw new Error('runoutZonesBuffer is detached');
+    }
     
     const resultJson = find_path_rs(
       elevationsBuffer,
@@ -209,15 +228,28 @@ async function handleComputeAzimuths(request: ComputeAzimuthsRequest): Promise<v
   
   try {
     console.log('[Worker] Starting azimuth computation, buffer length:', elevationsGeotiff.length);
+    console.log('[Worker] elevationsGeotiff byteLength:', elevationsGeotiff.byteLength);
+    console.log('[Worker] elevationsGeotiff detached:', elevationsGeotiff.buffer.byteLength === 0);
+    
+    // Validate buffer isn't detached
+    if (elevationsGeotiff.buffer.byteLength === 0) {
+      throw new Error('elevationsGeotiff buffer is detached');
+    }
+    
+    // Validate buffer has reasonable size (at least some bytes for a GeoTIFF header)
+    if (elevationsGeotiff.length < 100) {
+      throw new Error(`elevationsGeotiff buffer too small: ${elevationsGeotiff.length} bytes`);
+    }
+    
     await ensureWasmInit();
     console.log('[Worker] WASM initialized for azimuths');
     
-    const result = compute_azimuths(elevationsGeotiff, excludedAspects);
+    const result = compute_azimuths(elevationsGeotiff, excludedAspects ?? []);
     console.log('[Worker] Azimuths computed:', {
       elevationsLength: result.elevations.length,
       azimuthsLength: result.azimuths.length,
       gradientsLength: result.gradients.length,
-      runoutZonesLength: result.runout_zones.length
+      runoutZonesLength: result.runout_zones?.length
     });
     
     self.postMessage({

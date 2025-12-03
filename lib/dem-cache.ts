@@ -31,6 +31,7 @@ interface CachedAzimuths {
   azimuths: ArrayBuffer;
   gradients: ArrayBuffer;
   runout_zones?: ArrayBuffer;
+  excludedAspects: string[];
   timestamp: number;
 }
 
@@ -46,6 +47,21 @@ function boundsToKey(bounds: Bounds): string {
   const e = bounds.east.toFixed(3);
   const w = bounds.west.toFixed(3);
   return `dem_${n}_${s}_${e}_${w}`;
+}
+
+/**
+ * Generate a cache key for azimuths that includes excluded aspects.
+ * Runout zones depend on which aspects are excluded, so different aspect
+ * selections need separate cache entries.
+ */
+function azimuthCacheKey(bounds: Bounds, excludedAspects?: string[]): string {
+  const baseKey = boundsToKey(bounds);
+  const aspects = excludedAspects ?? [];
+  // Sort aspects for consistent key regardless of selection order
+  const aspectsKey = aspects.length > 0 
+    ? `_aspects_${[...aspects].sort().join('-')}` 
+    : '';
+  return `${baseKey}${aspectsKey}`;
 }
 
 /**
@@ -513,13 +529,13 @@ export interface AzimuthData {
 }
 
 /**
- * Get cached azimuths for bounds
+ * Get cached azimuths for bounds and excluded aspects
  */
-export async function getCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
+export async function getCachedAzimuths(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    const key = boundsToKey(normalizedBounds);
+    const key = azimuthCacheKey(normalizedBounds, excludedAspects ?? []);
     
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
@@ -548,12 +564,25 @@ export async function getCachedAzimuths(bounds: Bounds): Promise<AzimuthData | n
 }
 
 /**
- * Find cached azimuths that contain the requested bounds
+ * Check if two aspect arrays are equivalent (same aspects, any order)
  */
-export async function findContainingCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
+function aspectsMatch(a?: string[], b?: string[]): boolean {
+  const arrA = a ?? [];
+  const arrB = b ?? [];
+  if (arrA.length !== arrB.length) return false;
+  const sortedA = [...arrA].sort();
+  const sortedB = [...arrB].sort();
+  return sortedA.every((val, i) => val === sortedB[i]);
+}
+
+/**
+ * Find cached azimuths that contain the requested bounds and match excluded aspects
+ */
+export async function findContainingCachedAzimuths(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
+    const aspects = excludedAspects ?? [];
     
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
@@ -565,8 +594,10 @@ export async function findContainingCachedAzimuths(bounds: Bounds): Promise<Azim
         const cursor = request.result;
         if (cursor) {
           const cached = cursor.value as CachedAzimuths;
-          if (boundsContain(cached.bounds, normalizedBounds)) {
-            console.log('[Azimuth Cache] Found containing cached azimuths');
+          // Must match both bounds containment AND excluded aspects
+          // Handle legacy cache entries that don't have excludedAspects
+          if (boundsContain(cached.bounds, normalizedBounds) && aspectsMatch(cached.excludedAspects, aspects)) {
+            console.log('[Azimuth Cache] Found containing cached azimuths with matching aspects');
             resolve({
               elevations: new Uint8Array(cached.elevations),
               azimuths: new Uint8Array(cached.azimuths),
@@ -621,13 +652,14 @@ export async function findCachedAzimuthBoundsContaining(bounds: Bounds): Promise
 }
 
 /**
- * Cache computed azimuths
+ * Cache computed azimuths with excluded aspects
  */
-export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<void> {
+export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, excludedAspects?: string[]): Promise<void> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    const key = boundsToKey(normalizedBounds);
+    const aspects = excludedAspects ?? [];
+    const key = azimuthCacheKey(normalizedBounds, aspects);
     
     const cached: CachedAzimuths = {
       key,
@@ -636,6 +668,7 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<
       azimuths: data.azimuths.buffer as ArrayBuffer,
       gradients: data.gradients.buffer as ArrayBuffer,
       runout_zones: data.runout_zones?.buffer as ArrayBuffer | undefined,
+      excludedAspects: [...aspects],
       timestamp: Date.now(),
     };
     
@@ -657,16 +690,18 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<
 
 /**
  * Get azimuths with cache check (exact match or containing)
+ * Includes excludedAspects in the lookup since runout zones depend on them
  */
-export async function getAzimuthsWithContainsCheck(bounds: Bounds): Promise<AzimuthData | null> {
+export async function getAzimuthsWithContainsCheck(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
   const normalizedBounds = normalizeBounds(bounds);
+  const aspects = excludedAspects ?? [];
   
   // First check exact match
-  const exact = await getCachedAzimuths(normalizedBounds);
+  const exact = await getCachedAzimuths(normalizedBounds, aspects);
   if (exact) return exact;
   
   // Check for containing cached azimuths
-  const containing = await findContainingCachedAzimuths(normalizedBounds);
+  const containing = await findContainingCachedAzimuths(normalizedBounds, aspects);
   if (containing) return containing;
   
   return null;

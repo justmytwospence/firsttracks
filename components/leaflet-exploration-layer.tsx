@@ -21,6 +21,14 @@ interface LeafletExplorationLayerProps {
   lineWidth?: number;
 }
 
+// DEM cell size is approximately 1/10800 degrees (~10m at equator)
+const CELL_SIZE = 1 / 10800;
+const INV_CELL_SIZE = 10800; // Pre-computed inverse for faster multiplication
+
+// Pre-allocated arrays for neighbor offsets (8-connectivity)
+const NEIGHBOR_DX = [-1, 0, 1, -1, 1, -1, 0, 1];
+const NEIGHBOR_DY = [-1, -1, -1, 0, 0, 1, 1, 1];
+
 /**
  * Canvas-based Leaflet layer for visualizing A* exploration in real-time.
  * Uses a custom L.Layer subclass for optimal performance.
@@ -39,10 +47,18 @@ export function LeafletExplorationLayer({
   const layerRef = useRef<L.Layer | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const nodesRef = useRef<ExplorationNode[]>([]);
+  const lastNodesLengthRef = useRef<number>(0);
+  const needsRedrawRef = useRef<boolean>(true);
   
-  // Keep nodes ref updated
+  // Reusable data structures to avoid GC pressure
+  const gridSetRef = useRef<Set<number>>(new Set());
+  const nodesByGridRef = useRef<Map<number, ExplorationNode>>(new Map());
+  const drawnEdgesRef = useRef<Set<number>>(new Set());
+  
+  // Keep nodes ref updated and mark for redraw
   useEffect(() => {
     nodesRef.current = nodes;
+    needsRedrawRef.current = true;
   }, [nodes]);
   
   // Create and add canvas layer
@@ -67,9 +83,12 @@ export function LeafletExplorationLayer({
           pane.appendChild(canvas);
         }
         
-        // Handle map move/resize
+        // Handle map move/resize - mark for redraw
+        const markRedraw = () => { needsRedrawRef.current = true; };
         leafletMap.on('move', this._updatePosition, this);
+        leafletMap.on('move', markRedraw);
         leafletMap.on('resize', this._onResize, this);
+        leafletMap.on('zoom', markRedraw);
         
         this._updatePosition();
       },
@@ -87,6 +106,7 @@ export function LeafletExplorationLayer({
         if (!canvasRef.current) return;
         const pos = map.containerPointToLayerPoint([0, 0]);
         L.DomUtil.setPosition(canvasRef.current, pos);
+        needsRedrawRef.current = true;
       },
       
       _onResize() {
@@ -94,6 +114,7 @@ export function LeafletExplorationLayer({
         const size = map.getSize();
         canvasRef.current.width = size.x;
         canvasRef.current.height = size.y;
+        needsRedrawRef.current = true;
       },
     });
     
@@ -149,21 +170,25 @@ export function LeafletExplorationLayer({
           return;
         }
         
-        // DEM cell size is approximately 1/10800 degrees (~10m at equator)
-        const cellSize = 1 / 10800;
+        // Reuse data structures - clear instead of recreating
+        const gridSet = gridSetRef.current;
+        const nodesByGrid = nodesByGridRef.current;
+        const drawnEdges = drawnEdgesRef.current;
+        gridSet.clear();
+        nodesByGrid.clear();
+        drawnEdges.clear();
         
-        // Build a set of grid positions for fast lookup
-        // Round to grid cells for comparison
-        const toGridKey = (lon: number, lat: number) => {
-          const gx = Math.round(lon / cellSize);
-          const gy = Math.round(lat / cellSize);
-          return `${gx},${gy}`;
+        // Use integer grid keys for faster hashing
+        // Combine gx and gy into a single number: gx * 1000000 + gy (assumes grid coords < 1M)
+        const toGridKey = (lon: number, lat: number): number => {
+          const gx = Math.round(lon * INV_CELL_SIZE);
+          const gy = Math.round(lat * INV_CELL_SIZE);
+          return gx * 1000000 + gy;
         };
         
-        const gridSet = new Set<string>();
-        const nodesByGrid = new Map<string, typeof visibleNodes[0]>();
-        
-        for (const node of visibleNodes) {
+        // Build grid lookup
+        for (let i = 0; i < visibleNodes.length; i++) {
+          const node = visibleNodes[i];
           const key = toGridKey(node.lon, node.lat);
           gridSet.add(key);
           nodesByGrid.set(key, node);
@@ -171,9 +196,9 @@ export function LeafletExplorationLayer({
         
         // Calculate average alpha
         let totalAlpha = 0;
-        const now2 = Date.now();
-        for (const node of visibleNodes) {
-          const age = now2 - node.timestamp;
+        for (let i = 0; i < visibleNodes.length; i++) {
+          const node = visibleNodes[i];
+          const age = now - node.timestamp;
           let alpha = baseAlpha;
           if (age > persistDuration) {
             const fadeProgress = (age - persistDuration) / fadeOutDuration;
@@ -188,34 +213,32 @@ export function LeafletExplorationLayer({
         ctx.lineWidth = lineWidth;
         ctx.beginPath();
         
-        const drawnEdges = new Set<string>();
-        
-        for (const node of visibleNodes) {
-          const gx = Math.round(node.lon / cellSize);
-          const gy = Math.round(node.lat / cellSize);
+        for (let i = 0; i < visibleNodes.length; i++) {
+          const node = visibleNodes[i];
+          const gx = Math.round(node.lon * INV_CELL_SIZE);
+          const gy = Math.round(node.lat * INV_CELL_SIZE);
           
-          // Check all 8 neighbors
-          for (let dx = -1; dx <= 1; dx++) {
-            for (let dy = -1; dy <= 1; dy++) {
-              if (dx === 0 && dy === 0) continue;
+          // Check all 8 neighbors using pre-allocated offset arrays
+          for (let n = 0; n < 8; n++) {
+            const ngx = gx + NEIGHBOR_DX[n];
+            const ngy = gy + NEIGHBOR_DY[n];
+            const neighborKey = ngx * 1000000 + ngy;
+            
+            if (gridSet.has(neighborKey)) {
+              // Create edge key - use consistent ordering to avoid duplicates
+              const edgeKey = gx < ngx || (gx === ngx && gy < ngy)
+                ? gx * 1e12 + gy * 1e6 + ngx * 1e3 + ngy
+                : ngx * 1e12 + ngy * 1e6 + gx * 1e3 + gy;
               
-              const neighborKey = `${gx + dx},${gy + dy}`;
-              if (gridSet.has(neighborKey)) {
-                // Create edge key to avoid drawing twice
-                const edgeKey = gx < gx + dx || (gx === gx + dx && gy < gy + dy)
-                  ? `${gx},${gy}-${gx + dx},${gy + dy}`
-                  : `${gx + dx},${gy + dy}-${gx},${gy}`;
+              if (!drawnEdges.has(edgeKey)) {
+                drawnEdges.add(edgeKey);
                 
-                if (!drawnEdges.has(edgeKey)) {
-                  drawnEdges.add(edgeKey);
-                  
-                  const neighbor = nodesByGrid.get(neighborKey);
-                  if (neighbor) {
-                    const p1 = map.latLngToContainerPoint([node.lat, node.lon]);
-                    const p2 = map.latLngToContainerPoint([neighbor.lat, neighbor.lon]);
-                    ctx.moveTo(p1.x, p1.y);
-                    ctx.lineTo(p2.x, p2.y);
-                  }
+                const neighbor = nodesByGrid.get(neighborKey);
+                if (neighbor) {
+                  const p1 = map.latLngToContainerPoint([node.lat, node.lon]);
+                  const p2 = map.latLngToContainerPoint([neighbor.lat, neighbor.lon]);
+                  ctx.moveTo(p1.x, p1.y);
+                  ctx.lineTo(p2.x, p2.y);
                 }
               }
             }
@@ -224,8 +247,14 @@ export function LeafletExplorationLayer({
         
         ctx.stroke();
       } else {
-        // Points mode: draw individual dots (original behavior)
-        for (const node of currentNodes) {
+        // Points mode: draw individual dots with batched drawing by alpha
+        // Group points by alpha to minimize fillStyle changes
+        const TWO_PI = Math.PI * 2;
+        const nodeCount = currentNodes.length;
+        
+        // Pre-calculate visible points and their alphas
+        for (let i = 0; i < nodeCount; i++) {
+          const node = currentNodes[i];
           const age = now - node.timestamp;
           
           // Skip if fully faded
@@ -243,10 +272,10 @@ export function LeafletExplorationLayer({
           // Convert lat/lng to container point
           const point = map.latLngToContainerPoint([node.lat, node.lon]);
           
-          // Draw point
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+          // Draw point - batch begin/fill for same alpha
           ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(point.x, point.y, radius, 0, TWO_PI);
           ctx.fill();
         }
       }

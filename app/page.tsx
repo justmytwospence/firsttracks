@@ -6,6 +6,7 @@ import FindPathButton, { type Aspect } from "@/components/find-path-button";
 import GradientCDF from "@/components/gradient-cdf-chart";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import LocationSearch from "@/components/location-search";
+import { AspectSelector } from "@/components/ui/aspect-selector";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,7 +24,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { SelectAspectsDialog } from "@/components/ui/select-aspects-dialog";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
 import { type Bounds, findCachedAzimuthBoundsContaining, preloadDEM } from "@/lib/dem-cache";
@@ -66,6 +66,7 @@ export default function PathFinderPage() {
   const [selectedChart, setSelectedChart] = useState<"elevation" | "gradient">("elevation");
   const [explorationNodes, setExplorationNodes] = useState<ExplorationNode[]>([]);
   const [showFrontier, setShowFrontier] = useState(true);
+  const [avoidRunoutZones, setAvoidRunoutZones] = useState(true);
   const [cachedBounds, setCachedBounds] = useState<Bounds | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFilename, setExportFilename] = useState("path");
@@ -502,6 +503,8 @@ export default function PathFinderPage() {
 
   const handleSetAspectRaster = useCallback(
     async (azimuths: Uint8Array, gradients: Uint8Array, runoutZones?: Uint8Array) => {
+      console.log('[Raster] handleSetAspectRaster called, runoutZones:', runoutZones?.length ?? 'undefined');
+      
       const azimuthRaster = (await parseGeoraster(
         azimuths.buffer as ArrayBuffer
       )) as GeoRaster;
@@ -512,12 +515,14 @@ export default function PathFinderPage() {
 
       const rastersToMerge = [azimuthRaster, gradientRaster];
       
-      // Add runout zones raster if provided
-      if (runoutZones) {
+      // Add runout zones raster if provided and has data
+      if (runoutZones && runoutZones.length > 0) {
+        console.log('[Raster] Parsing runout zones raster');
         const runoutRaster = (await parseGeoraster(
           runoutZones.buffer as ArrayBuffer
         )) as GeoRaster;
         rastersToMerge.push(runoutRaster);
+        console.log('[Raster] Runout raster added, bands now:', rastersToMerge.length);
       }
 
       const mergedRaster = rastersToMerge.reduce(
@@ -530,6 +535,7 @@ export default function PathFinderPage() {
           numberOfRasters: result.values.length + georaster.values.length,
         })
       );
+      console.log('[Raster] Final merged raster bands:', mergedRaster.numberOfRasters);
       setAspectRaster(mergedRaster as GeoRaster);
     },
     []
@@ -699,7 +705,8 @@ export default function PathFinderPage() {
               style={{ scrollbarWidth: 'none', msOverflowStyle: 'none', overflowY: 'hidden' }}
             >
               {/* Page 1: Controls */}
-              <div className="snap-center shrink-0 w-full min-h-full p-4 space-y-3">
+              <div className="snap-center shrink-0 w-full h-full p-3 overflow-y-auto">
+                <div className="flex flex-col justify-between h-full">
                 {/* Top row: Search + Actions */}
                 <div className="flex gap-2">
                   <div className="flex-1 min-w-0">
@@ -737,7 +744,7 @@ export default function PathFinderPage() {
                 </div>
 
                 {/* Gradient slider - full row */}
-                <div className="space-y-2">
+                <div className="space-y-1">
                   <div className="flex justify-between items-center">
                     <span className="text-sm text-muted-foreground">{useDegrees ? 'Max Slope' : 'Max Gradient'}</span>
                     <span className="text-sm font-medium">{formatSlope(maxGradient, useDegrees, 0)}</span>
@@ -752,63 +759,84 @@ export default function PathFinderPage() {
                   />
                 </div>
 
-                {/* Unit preference toggle */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Units</span>
-                  <div className="flex rounded-md border text-xs">
+                {/* Toggles row - compact horizontal layout */}
+                <div className="flex items-center justify-between gap-3">
+                  {/* Units toggle */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Units</span>
+                    <div className="flex rounded-md border text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setUseDegrees(false)}
+                        className={`px-1.5 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                      >
+                        %
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setUseDegrees(true)}
+                        className={`px-1.5 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                      >
+                        °
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Animate toggle */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Animate</span>
                     <button
                       type="button"
-                      onClick={() => setUseDegrees(false)}
-                      className={`px-2 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                      onClick={() => setShowFrontier(!showFrontier)}
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
                     >
-                      %
+                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${showFrontier ? 'translate-x-5' : 'translate-x-1'}`} />
                     </button>
+                  </div>
+
+                  {/* Runouts toggle */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-muted-foreground">Runouts</span>
                     <button
                       type="button"
-                      onClick={() => setUseDegrees(true)}
-                      className={`px-2 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
+                      onClick={() => setAvoidRunoutZones(!avoidRunoutZones)}
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${avoidRunoutZones ? 'bg-amber-500' : 'bg-gray-300'}`}
                     >
-                      °
+                      <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${avoidRunoutZones ? 'translate-x-5' : 'translate-x-1'}`} />
                     </button>
                   </div>
                 </div>
 
-                {/* Algorithm animation toggle */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">Animate</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowFrontier(!showFrontier)}
-                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
-                  >
-                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${showFrontier ? 'translate-x-6' : 'translate-x-1'}`} />
-                  </button>
+                {/* Find Path button - full width */}
+                <FindPathButton
+                  ref={findPathRef}
+                  waypoints={waypoints}
+                  bounds={cachedBounds}
+                  maxGradient={maxGradient}
+                  excludedAspects={excludedAspects}
+                  isLoading={isLoading}
+                  setIsLoading={setIsLoading}
+                  setPath={handleSetPath}
+                  setPathAspects={handleSetPathAspects}
+                  setAspectRaster={handleSetAspectRaster}
+                  onExplorationUpdate={handleExplorationUpdate}
+                  onExplorationComplete={handleExplorationComplete}
+                  onStartPathfinding={handleStartPathfinding}
+                  onlyLastSegment={path !== null && !forceFullRepathRef.current}
+                  preloadBounds={cachedBounds}
+                  avoidRunoutZones={avoidRunoutZones}
+                  className="w-full"
+                />
                 </div>
+              </div>
 
-                {/* Aspects + Find Path buttons (equal width, Find Path on right) */}
-                <div className="flex gap-2 pt-1">
-                  <SelectAspectsDialog
-                    onSelectDirections={setExcludedAspects}
-                    selectedDirections={excludedAspects}
-                    className="flex-1"
-                  />
-                  <FindPathButton
-                    ref={findPathRef}
-                    waypoints={waypoints}
-                    bounds={cachedBounds}
-                    maxGradient={maxGradient}
-                    excludedAspects={excludedAspects}
-                    isLoading={isLoading}
-                    setIsLoading={setIsLoading}
-                    setPath={handleSetPath}
-                    setPathAspects={handleSetPathAspects}
-                    setAspectRaster={handleSetAspectRaster}
-                    onExplorationUpdate={handleExplorationUpdate}
-                    onExplorationComplete={handleExplorationComplete}
-                    onStartPathfinding={handleStartPathfinding}
-                    onlyLastSegment={path !== null && !forceFullRepathRef.current}
-                    preloadBounds={cachedBounds}
-                    className="flex-1"
+              {/* Page 2: Avoid Aspects selector */}
+              <div className="snap-center shrink-0 w-full h-full p-3 flex flex-col items-center justify-center">
+                <span className="text-sm text-muted-foreground mb-2">Avoid Aspects</span>
+                <div className="flex-1 w-full max-w-[180px] aspect-square">
+                  <AspectSelector
+                    selectedAspects={excludedAspects}
+                    onAspectToggle={setExcludedAspects}
                   />
                 </div>
               </div>
@@ -816,17 +844,17 @@ export default function PathFinderPage() {
               {/* Chart pages - only when path exists */}
               {path && (
                 <>
-                  {/* Page 2: Elevation chart */}
+                  {/* Page 3: Elevation chart */}
                   <div className="snap-center shrink-0 w-full h-full p-3">
                     <ElevationProfile polyline={path} />
                   </div>
 
-                  {/* Page 3: Gradient chart */}
+                  {/* Page 4: Gradient chart */}
                   <div className="snap-center shrink-0 w-full h-full p-3">
                     <GradientCDF mappables={[{ polyline: path, name: "Path", id: "path" }]} />
                   </div>
 
-                  {/* Page 4: Aspect chart */}
+                  {/* Page 5: Aspect chart */}
                   {pathAspects && (
                     <div className="snap-center shrink-0 w-full h-full p-3 flex items-center justify-center">
                       <div className="h-full max-h-full aspect-square">
@@ -841,7 +869,7 @@ export default function PathFinderPage() {
             {/* Page indicators - clickable dots */}
             <div className="flex justify-center gap-2 py-2 shrink-0">
               {(() => {
-                const pages = ['controls', 'elevation', 'gradient', 'aspect'].slice(0, path ? (pathAspects ? 4 : 3) : 1);
+                const pages = ['controls', 'aspects', ...(path ? ['elevation', 'gradient', ...(pathAspects ? ['aspect'] : [])] : [])];
                 return pages.map((pageId, i) => (
                   <button
                     key={pageId}
@@ -915,6 +943,18 @@ export default function PathFinderPage() {
               </button>
             </div>
 
+            {/* Avoid runout zones toggle */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">Avoid Runouts</span>
+              <button
+                type="button"
+                onClick={() => setAvoidRunoutZones(!avoidRunoutZones)}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${avoidRunoutZones ? 'bg-amber-500' : 'bg-gray-300'}`}
+              >
+                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${avoidRunoutZones ? 'translate-x-5' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
             {/* Actions */}
             <div className="space-y-2">
               <FindPathButton
@@ -933,6 +973,7 @@ export default function PathFinderPage() {
                 onStartPathfinding={handleStartPathfinding}
                 onlyLastSegment={path !== null && !forceFullRepathRef.current}
                 preloadBounds={cachedBounds}
+                avoidRunoutZones={avoidRunoutZones}
                 className="w-full"
               />
               <div className="flex gap-2">
@@ -974,18 +1015,16 @@ export default function PathFinderPage() {
               </div>
             </div>
 
-            {/* Excluded Aspects - above aspect chart */}
-            <SelectAspectsDialog
-              onSelectDirections={setExcludedAspects}
-              selectedDirections={excludedAspects}
-            />
-
-            {/* Aspect Chart - only show when path exists */}
-            {path && pathAspects && (
-              <div className="w-full aspect-square">
-                <AspectChart aspectPoints={pathAspects} />
+            {/* Avoid Aspects - inline selector */}
+            <div className="space-y-2">
+              <span className="text-sm">Avoid Aspects</span>
+              <div className="w-full max-w-[200px] mx-auto aspect-square">
+                <AspectSelector
+                  selectedAspects={excludedAspects}
+                  onAspectToggle={setExcludedAspects}
+                />
               </div>
-            )}
+            </div>
           </div>
         )}
       </div>
@@ -1079,11 +1118,6 @@ export default function PathFinderPage() {
                 <span className="sr-only">Close</span>
               </button>
               <div className="space-y-4 pr-4">
-                <div className="space-y-1">
-                  <h3 className="font-semibold">How to Use</h3>
-                  <p className="text-sm text-muted-foreground">Plan terrain-aware routes</p>
-                </div>
-                
                 <div className="space-y-2">
                   <h4 className="font-medium text-sm">Getting Started</h4>
                   <ol className="list-decimal list-inside space-y-1 text-xs text-muted-foreground">
@@ -1118,6 +1152,14 @@ export default function PathFinderPage() {
                     <li><strong>Elevation:</strong> Height profile along route</li>
                     <li><strong>Gradient:</strong> Hover to see % of route steeper than that point</li>
                     <li><strong>Aspect:</strong> Distribution of slope directions</li>
+                  </ul>
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="font-medium text-sm">Map Shading</h4>
+                  <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
+                    <li><span className="inline-block w-2 h-2 rounded-sm bg-red-500 mr-1" /><strong>Red:</strong> Avoided aspects (steep slopes facing selected directions)</li>
+                    <li><span className="inline-block w-2 h-2 rounded-sm bg-amber-500 mr-1" /><strong>Amber:</strong> Runout zones (areas below steep avoided terrain)</li>
                   </ul>
                 </div>
 
@@ -1167,6 +1209,7 @@ export default function PathFinderPage() {
               <LeafletRasterLayer
                 aspectRaster={aspectRaster}
                 excludedAspects={excludedAspects}
+                avoidRunoutZones={avoidRunoutZones}
               />
             )}
             {cachedBounds && (
@@ -1224,21 +1267,27 @@ export default function PathFinderPage() {
                   </button>
                 </div>
                 
-                {/* Chart content */}
-                <div className="flex-1 p-4">
-                  {selectedChart === "elevation" && (
-                    <div className="h-full">
-                      <ElevationProfile polyline={path} />
+                {/* Chart content - aspect chart on left, line chart on right */}
+                <div className="flex-1 p-4 flex gap-4">
+                  {/* Aspect chart - fixed square, only when pathAspects exists */}
+                  {pathAspects && (
+                    <div className="h-full aspect-square shrink-0">
+                      <AspectChart aspectPoints={pathAspects} />
                     </div>
                   )}
                   
-                  {selectedChart === "gradient" && (
-                    <div className="h-full">
+                  {/* Line chart - fills remaining space */}
+                  <div className="flex-1 h-full min-w-0">
+                    {selectedChart === "elevation" && (
+                      <ElevationProfile polyline={path} />
+                    )}
+                    
+                    {selectedChart === "gradient" && (
                       <GradientCDF
                         mappables={[{ polyline: path, name: "Path", id: "path" }]}
                       />
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

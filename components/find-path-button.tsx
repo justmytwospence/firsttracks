@@ -118,6 +118,7 @@ interface FindPathButtonProps {
   className?: string;
   onlyLastSegment?: boolean;
   preloadBounds?: Bounds | null;
+  avoidRunoutZones?: boolean;
 }
 
 // Worker message types
@@ -153,6 +154,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       className,
       onlyLastSegment = false,
       preloadBounds,
+      avoidRunoutZones = true,
     },
     ref
   ) {
@@ -165,6 +167,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
     const cachedAzimuthsRef = useRef<AzimuthData | null>(null);
     const currentPathfindingIdRef = useRef<string | null>(null);
     const prevWaypointCountRef = useRef(0);
+    const lastSuccessfulWaypointCountRef = useRef(0);
     const preloadingRef = useRef(false);
     const lastPreloadedBoundsRef = useRef<string | null>(null);
     
@@ -181,6 +184,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         cachedAzimuthsRef.current = null; // Clear cached azimuths when waypoints reset
         currentPathfindingIdRef.current = null; // Cancel any in-progress pathfinding
         preloadingRef.current = false; // Allow new preloading
+        lastSuccessfulWaypointCountRef.current = 0; // Reset incremental pathfinding tracker
         setIsLoading(false);
         toast.dismiss();
       } else if (waypointCountDecreased && isLoading) {
@@ -190,6 +194,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         processingRef.current = false;
         batchCountRef.current = 0;
         currentPathfindingIdRef.current = null;
+        lastSuccessfulWaypointCountRef.current = 0; // Reset so next pathfind is full
         setIsLoading(false);
         toast.dismiss();
         // Reset shouldStop so future pathfinding can work
@@ -282,7 +287,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         
         try {
           // Check IndexedDB cache first
-          let azimuthResult = await getAzimuthsWithContainsCheck(preloadBounds);
+          let azimuthResult = await getAzimuthsWithContainsCheck(preloadBounds, excludedAspects);
           
           if (!azimuthResult) {
             // Fetch DEM data
@@ -321,7 +326,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             });
             
             // Cache to IndexedDB
-            await cacheAzimuths(preloadBounds, azimuthResult);
+            await cacheAzimuths(preloadBounds, azimuthResult, excludedAspects);
           }
           
           // Cache in memory
@@ -357,6 +362,14 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         console.log('Early return: bounds or worker not ready');
         return;
       }
+      
+      // Clear existing path when starting new pathfinding
+      // Pass invocationCounter 0 to signal a fresh start
+      if (!onlyLastSegment) {
+        setPath(null, 0);
+        setPathAspects({ type: "FeatureCollection", features: [] });
+      }
+      
       setIsLoading(true);
       onStartPathfinding?.();
       batchCountRef.current = 0;
@@ -373,7 +386,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         // Only fetch/compute azimuths if not already cached in memory
         if (!azimuthResult) {
           // Check IndexedDB cache first
-          azimuthResult = await getAzimuthsWithContainsCheck(bounds);
+          azimuthResult = await getAzimuthsWithContainsCheck(bounds, excludedAspects);
           
           if (!azimuthResult) {
             // Fetch DEM data (with caching - will use preloaded expanded region if available)
@@ -426,7 +439,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             azimuthResult = await azimuthsPromise;
             
             // Cache the computed azimuths to IndexedDB for next session
-            await cacheAzimuths(bounds, azimuthResult);
+            await cacheAzimuths(bounds, azimuthResult, excludedAspects);
           }
           
           // Cache in memory for subsequent pathfinding in this session
@@ -449,11 +462,16 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         }
         
         // Find paths - either all segments or just the last one
-        // onlyLastSegment=true when adding a new waypoint to an existing path
-        // onlyLastSegment=false when dragging/inserting waypoints (triggers full re-pathfinding)
-        const startSegment = onlyLastSegment ? waypoints.length - 2 : 0;
-        let pathSegmentCounter = onlyLastSegment ? 1 : 0; // Start at 1 to append if onlyLastSegment
-        console.log('FindPathButton: waypoints.length =', waypoints.length, 'onlyLastSegment =', onlyLastSegment, 'startSegment =', startSegment);
+        // Only do last segment if:
+        // 1. onlyLastSegment prop is true (caller wants incremental)
+        // 2. Waypoint count increased by exactly 1 since last successful pathfind
+        // 3. We have a previous successful pathfind (lastSuccessfulWaypointCountRef > 0)
+        const addedOneWaypoint = waypoints.length === lastSuccessfulWaypointCountRef.current + 1;
+        const effectiveOnlyLastSegment = onlyLastSegment && addedOneWaypoint && lastSuccessfulWaypointCountRef.current > 0;
+        
+        const startSegment = effectiveOnlyLastSegment ? waypoints.length - 2 : 0;
+        let pathSegmentCounter = effectiveOnlyLastSegment ? 1 : 0; // Start at 1 to append if effectiveOnlyLastSegment
+        console.log('FindPathButton: waypoints.length =', waypoints.length, 'onlyLastSegment =', onlyLastSegment, 'effectiveOnlyLastSegment =', effectiveOnlyLastSegment, 'lastSuccessful =', lastSuccessfulWaypointCountRef.current, 'startSegment =', startSegment);
         
         // Start polling the exploration queue so visualization happens during pathfinding
         const queuePollInterval = setInterval(() => {
@@ -507,7 +525,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               aspectGradientThreshold: 0.05,
               explorationBatchSize,
               explorationDelayMs,
-              runoutZonesBuffer: azimuthData.runout_zones ? new Uint8Array(azimuthData.runout_zones) : undefined,
+              runoutZonesBuffer: avoidRunoutZones && azimuthData.runout_zones ? new Uint8Array(azimuthData.runout_zones) : undefined,
             } as WorkerRequest);
           });
           
@@ -553,9 +571,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           }
         }
         } finally {
-          // Stop polling the exploration queue
-          clearInterval(queuePollInterval);
+          // Stop polling the exploration queue\n          clearInterval(queuePollInterval);
         }
+        
+        // Track successful pathfinding waypoint count for incremental optimization
+        lastSuccessfulWaypointCountRef.current = waypoints.length;
+        
       } catch (error) {
         toast.dismiss(loadingToastId);
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -578,6 +599,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       explorationBatchSize,
       explorationDelayMs,
       onlyLastSegment,
+      avoidRunoutZones,
     ]);
 
     return (
