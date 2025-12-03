@@ -107,7 +107,8 @@ interface FindPathButtonProps {
   setPathAspects: (aspectPoints: FeatureCollection) => void;
   setAspectRaster: (
     azimuthRaster: Uint8Array,
-    gradientRaster: Uint8Array
+    gradientRaster: Uint8Array,
+    runoutRaster?: Uint8Array
   ) => void;
   onExplorationUpdate?: (nodes: ExplorationNode[]) => void;
   onExplorationComplete?: () => void;
@@ -290,6 +291,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                     elevations: event.data.elevations as Uint8Array,
                     azimuths: event.data.azimuths as Uint8Array,
                     gradients: event.data.gradients as Uint8Array,
+                    runout_zones: event.data.runout_zones as Uint8Array,
                   });
                 }
               };
@@ -299,6 +301,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                 type: "compute_azimuths",
                 id,
                 elevationsGeotiff: new Uint8Array(demData),
+                excludedAspects,
               } as WorkerRequest);
             });
             
@@ -311,10 +314,11 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             elevations: new Uint8Array(azimuthResult.elevations),
             azimuths: new Uint8Array(azimuthResult.azimuths),
             gradients: new Uint8Array(azimuthResult.gradients),
+            runout_zones: azimuthResult.runout_zones ? new Uint8Array(azimuthResult.runout_zones) : undefined,
           };
           
           // Update aspect raster display
-          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients);
+          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
           
           console.log('[Preload] Azimuths ready');
         } catch (error) {
@@ -325,7 +329,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       };
       
       preloadAzimuths();
-    }, [preloadBounds, setAspectRaster]);
+    }, [preloadBounds, setAspectRaster, excludedAspects]);
     
     const handleClick = useCallback(async () => {
       console.log('=== FindPathButton handleClick START ===');
@@ -390,6 +394,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                     elevations: event.data.elevations as Uint8Array,
                     azimuths: event.data.azimuths as Uint8Array,
                     gradients: event.data.gradients as Uint8Array,
+                    runout_zones: event.data.runout_zones as Uint8Array,
                   });
                 }
               };
@@ -399,6 +404,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                 type: "compute_azimuths",
                 id,
                 elevationsGeotiff: new Uint8Array(demData),
+                excludedAspects,
               } as WorkerRequest);
             });
             
@@ -414,10 +420,11 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             elevations: new Uint8Array(azimuthResult.elevations),
             azimuths: new Uint8Array(azimuthResult.azimuths),
             gradients: new Uint8Array(azimuthResult.gradients),
+            runout_zones: azimuthResult.runout_zones ? new Uint8Array(azimuthResult.runout_zones) : undefined,
           };
           
           toast.dismiss(loadingToastId);
-          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients);
+          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
         }
         
         // Use the cached copy for pathfinding
@@ -485,6 +492,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               aspectGradientThreshold: 0.05,
               explorationBatchSize,
               explorationDelayMs,
+              runoutZonesBuffer: azimuthData.runout_zones ? new Uint8Array(azimuthData.runout_zones) : undefined,
             } as WorkerRequest);
           });
           

@@ -10,6 +10,7 @@ pub struct AzimuthResult {
   elevations: Vec<u8>,
   azimuths: Vec<u8>,
   gradients: Vec<u8>,
+  runout_zones: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -27,6 +28,11 @@ impl AzimuthResult {
   #[wasm_bindgen(getter)]
   pub fn gradients(&self) -> Vec<u8> {
     self.gradients.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn runout_zones(&self) -> Vec<u8> {
+    self.runout_zones.clone()
   }
 }
 
@@ -117,9 +123,114 @@ fn compute_gradient_along_azimuth(gx: f64, gy: f64, azimuth: f64) -> f64 {
   ((gx_normalized * gx_normalized) + (gy_normalized * gy_normalized)).sqrt()
 }
 
+/// Compute avalanche runout zones by following steepest descent from source zones.
+/// Source zones are pixels with gradient >= BETA_THRESHOLD (10° ≈ 0.176 rise/run) AND
+/// aspect in excluded_aspects. Runout propagates downhill until gradient drops below threshold.
+fn compute_runout_zones(
+  elevations: &Vec<Vec<f64>>,
+  azimuths: &Vec<Vec<f64>>,
+  gradients: &Vec<Vec<f64>>,
+  excluded_aspects: &[Aspect],
+) -> Vec<Vec<f64>> {
+  const BETA_THRESHOLD: f64 = 0.176; // tan(10°) - the beta point where debris typically stops
+
+  let height = elevations.len();
+  let width = elevations[0].len();
+  
+  let mut runout: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
+  
+  // If no aspects are excluded, no runout zones to compute
+  if excluded_aspects.is_empty() {
+    return runout;
+  }
+  
+  // Directions for 8-connected neighbors
+  const DIRECTIONS: [(isize, isize); 8] = [
+    (0, 1), (1, 0), (0, -1), (-1, 0),
+    (1, 1), (1, -1), (-1, -1), (-1, 1),
+  ];
+  
+  // For each pixel, check if it's a source zone
+  for i in 1..(height - 1) {
+    for j in 1..(width - 1) {
+      let gradient = gradients[i][j];
+      let azimuth = azimuths[i][j];
+      
+      // Skip if gradient is below threshold
+      if gradient < BETA_THRESHOLD {
+        continue;
+      }
+      
+      // Check if this pixel's aspect is in the excluded list
+      let mut is_excluded = false;
+      for aspect in excluded_aspects {
+        if aspect.contains_azimuth(azimuth, Some(22.5)) {
+          is_excluded = true;
+          break;
+        }
+      }
+      
+      if !is_excluded {
+        continue;
+      }
+      
+      // This is a source zone - follow steepest descent
+      let mut current_y = i;
+      let mut current_x = j;
+      
+      loop {
+        // Mark current cell as runout
+        runout[current_y][current_x] = 1.0;
+        
+        // Find neighbor with lowest elevation
+        let mut min_elevation = elevations[current_y][current_x];
+        let mut next_y = current_y;
+        let mut next_x = current_x;
+        
+        for &(dy, dx) in DIRECTIONS.iter() {
+          let ny = (current_y as isize + dy) as usize;
+          let nx = (current_x as isize + dx) as usize;
+          
+          if ny < height && nx < width {
+            let neighbor_elevation = elevations[ny][nx];
+            if neighbor_elevation < min_elevation {
+              min_elevation = neighbor_elevation;
+              next_y = ny;
+              next_x = nx;
+            }
+          }
+        }
+        
+        // If no lower neighbor found, stop
+        if next_y == current_y && next_x == current_x {
+          break;
+        }
+        
+        // If next cell's gradient is below threshold, stop (reached beta point)
+        if gradients[next_y][next_x] < BETA_THRESHOLD {
+          break;
+        }
+        
+        // Move to next cell
+        current_y = next_y;
+        current_x = next_x;
+      }
+    }
+  }
+  
+  runout
+}
+
 /// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for each pixel on a `Vec<f32>`
 #[wasm_bindgen]
-pub fn compute_azimuths(elevations_geotiff: &[u8]) -> Result<AzimuthResult, JsValue> {
+pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) -> Result<AzimuthResult, JsValue> {
+  // Parse excluded aspects from JS value
+  let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
+    vec![]
+  } else {
+    serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
+  };
+
   let cursor: Cursor<Vec<u8>> = Cursor::new(elevations_geotiff.to_vec());
   let mut elevations_geotiff: GeoTiffReader<Cursor<Vec<u8>>> =
     GeoTiffReader::open(cursor)
@@ -173,6 +284,9 @@ pub fn compute_azimuths(elevations_geotiff: &[u8]) -> Result<AzimuthResult, JsVa
     }
   }
 
+  // Compute runout zones based on excluded aspects
+  let runout_zones = compute_runout_zones(&elevations, &azimuths, &gradients, &excluded_aspects_vec);
+
   let geo_keys: Vec<u32> = elevations_geotiff.geo_keys.as_ref()
     .ok_or_else(|| JsValue::from_str("Missing geo_keys"))?
     .clone();
@@ -181,7 +295,8 @@ pub fn compute_azimuths(elevations_geotiff: &[u8]) -> Result<AzimuthResult, JsVa
 
   Ok(AzimuthResult {
     elevations: serialize_to_geotiff(elevations, &geo_keys, &origin)?,
-    azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin)?,
-    gradients: serialize_to_geotiff(gradients, &geo_keys, &origin)?,
+    azimuths: serialize_to_geotiff(azimuths.clone(), &geo_keys, &origin)?,
+    gradients: serialize_to_geotiff(gradients.clone(), &geo_keys, &origin)?,
+    runout_zones: serialize_to_geotiff(runout_zones, &geo_keys, &origin)?,
   })
 }

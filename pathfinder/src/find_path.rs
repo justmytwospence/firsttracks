@@ -211,6 +211,7 @@ pub fn find_path_rs(
   aspect_gradient_threshold: Option<f64>,
   exploration_callback: Option<Function>,
   exploration_batch_size: Option<usize>,
+  runout_zones_buffer: Option<Vec<u8>>,
 ) -> Result<String, JsValue> { 
   let max_gradient: f64 = max_gradient.unwrap_or(1.0);
   let excluded_aspects: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
@@ -234,6 +235,16 @@ pub fn find_path_rs(
   let mut gradients_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(gradients_cursor)
     .map_err(|e| JsValue::from_str(&format!("Failed to open gradients GeoTIFF: {:?}", e)))?;
   let gradients: Vec<Vec<f64>> = get_raster(&mut gradients_geotiff)?;
+
+  // Parse runout zones if provided
+  let runout_zones: Option<Vec<Vec<f64>>> = if let Some(buffer) = runout_zones_buffer {
+    let runout_cursor: Cursor<Vec<u8>> = Cursor::new(buffer);
+    let mut runout_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(runout_cursor)
+      .map_err(|e| JsValue::from_str(&format!("Failed to open runout zones GeoTIFF: {:?}", e)))?;
+    Some(get_raster(&mut runout_geotiff)?)
+  } else {
+    None
+  };
 
   let start_coord: Coordinate = parse_point_to_coordinate(&start)?;
   let end_coord: Coordinate = parse_point_to_coordinate(&end)?;
@@ -284,13 +295,20 @@ pub fn find_path_rs(
       let ny: usize = ((y as isize) + dy) as usize;
 
       if nx < width && ny < height {
+        // Check if neighbor is in a runout zone
+        if let Some(ref runout) = runout_zones {
+          if runout[ny][nx] > 0.0 {
+            continue 'neighbors;
+          }
+        }
+
         let azimuth: f64 = azimuths[ny][nx];
         let aspect_gradient: f64 = gradients[ny][nx];
         if aspect_gradient > aspect_gradient_threshold {
           for aspect in &excluded_aspects {
             // Use 22.5° tolerance to also exclude half of adjacent aspects
             if aspect.contains_azimuth(azimuth, Some(22.5)) {
-              break 'neighbors;
+              continue 'neighbors;
             }
           }
         }

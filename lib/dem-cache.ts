@@ -30,6 +30,7 @@ interface CachedAzimuths {
   elevations: ArrayBuffer;
   azimuths: ArrayBuffer;
   gradients: ArrayBuffer;
+  runout_zones?: ArrayBuffer;
   timestamp: number;
 }
 
@@ -508,6 +509,7 @@ export interface AzimuthData {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
+  runout_zones?: Uint8Array;
 }
 
 /**
@@ -533,6 +535,7 @@ export async function getCachedAzimuths(bounds: Bounds): Promise<AzimuthData | n
             elevations: new Uint8Array(result.elevations),
             azimuths: new Uint8Array(result.azimuths),
             gradients: new Uint8Array(result.gradients),
+            runout_zones: result.runout_zones ? new Uint8Array(result.runout_zones) : undefined,
           });
         } else {
           resolve(null);
@@ -568,6 +571,7 @@ export async function findContainingCachedAzimuths(bounds: Bounds): Promise<Azim
               elevations: new Uint8Array(cached.elevations),
               azimuths: new Uint8Array(cached.azimuths),
               gradients: new Uint8Array(cached.gradients),
+              runout_zones: cached.runout_zones ? new Uint8Array(cached.runout_zones) : undefined,
             });
             return;
           }
@@ -631,6 +635,7 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<
       elevations: data.elevations.buffer as ArrayBuffer,
       azimuths: data.azimuths.buffer as ArrayBuffer,
       gradients: data.gradients.buffer as ArrayBuffer,
+      runout_zones: data.runout_zones?.buffer as ArrayBuffer | undefined,
       timestamp: Date.now(),
     };
     
