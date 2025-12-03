@@ -293,10 +293,14 @@ pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) ->
   let origin: [f64; 2] = elevations_geotiff.origin()
     .ok_or_else(|| JsValue::from_str("Missing origin"))?;
 
+  // Serialize in order - elevations first since it's used in compute_runout_zones by reference
+  let elevations_geotiff_bytes = serialize_to_geotiff(elevations, &geo_keys, &origin)?;
+  let runout_zones_geotiff_bytes = serialize_to_geotiff(runout_zones, &geo_keys, &origin)?;
+  
   Ok(AzimuthResult {
-    elevations: serialize_to_geotiff(elevations, &geo_keys, &origin)?,
-    azimuths: serialize_to_geotiff(azimuths.clone(), &geo_keys, &origin)?,
-    gradients: serialize_to_geotiff(gradients.clone(), &geo_keys, &origin)?,
-    runout_zones: serialize_to_geotiff(runout_zones, &geo_keys, &origin)?,
+    elevations: elevations_geotiff_bytes,
+    azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin)?,
+    gradients: serialize_to_geotiff(gradients, &geo_keys, &origin)?,
+    runout_zones: runout_zones_geotiff_bytes,
   })
 }
