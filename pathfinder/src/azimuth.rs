@@ -204,15 +204,16 @@ fn compute_runout_zones(
           break;
         }
         
-        // If next cell's gradient is below threshold, stop (reached beta point)
-        if gradients[next_y][next_x] < BETA_THRESHOLD {
-          break;
-        }
-        
         // Move to next cell and mark it as runout
         current_y = next_y;
         current_x = next_x;
         runout[current_y][current_x] = 1.0;
+        
+        // If this cell's gradient is below threshold, stop (reached beta point)
+        // We still marked it as runout since debris would reach here
+        if gradients[current_y][current_x] < BETA_THRESHOLD {
+          break;
+        }
       }
     }
   }
