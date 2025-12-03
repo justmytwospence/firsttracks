@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type Bounds, boundsContain, expandBounds } from "./dem-cache";
+import { type Bounds, boundsContain, expandBounds, latLngToTile, tileToLatLng, getTilesForBounds, decodeTerrarium } from "./dem-cache";
 
 describe("boundsContain", () => {
   const outerBounds: Bounds = {
@@ -138,31 +138,7 @@ describe("expandBounds", () => {
     expect(newHeight).toBeCloseTo(originalHeight * 0.5, 5);
   });
 
-  it("limits expansion based on dataset max area", () => {
-    // Create large bounds that would exceed API limits
-    const largeBounds: Bounds = {
-      north: 45.0,
-      south: 35.0, // 10 degrees tall
-      east: -110.0,
-      west: -130.0, // 20 degrees wide
-    };
-
-    // Try to expand by 10x - should be limited
-    const expanded = expandBounds(largeBounds, 10, "USGS10m");
-
-    // Calculate the area of expanded bounds
-    const latDiff = expanded.north - expanded.south;
-    const lngDiff = expanded.east - expanded.west;
-    const avgLat = (expanded.north + expanded.south) / 2;
-    const latKm = latDiff * 111;
-    const lngKm = lngDiff * 111 * Math.cos(avgLat * Math.PI / 180);
-    const areaKm2 = latKm * lngKm;
-
-    // Should be less than or equal to USGS10m limit of 25000 km²
-    expect(areaKm2).toBeLessThanOrEqual(25000);
-  });
-
-  it("does not limit small expansions", () => {
+  it("does not limit small expansions (no API limits with AWS Terrain Tiles)", () => {
     // Small bounds that won't exceed limits even when expanded
     const smallBounds: Bounds = {
       north: 37.80,
@@ -181,5 +157,116 @@ describe("expandBounds", () => {
     // Should be exactly 3x without limiting
     expect(newWidth).toBeCloseTo(originalWidth * 3, 5);
     expect(newHeight).toBeCloseTo(originalHeight * 3, 5);
+  });
+});
+
+describe("tile coordinate utilities", () => {
+  describe("latLngToTile", () => {
+    it("converts known coordinate to correct tile", () => {
+      // San Francisco at zoom 14
+      const result = latLngToTile(37.7749, -122.4194, 14);
+      // Expected tile for SF at zoom 14 is approximately x=2620, y=6332
+      expect(result.x).toBe(2620);
+      expect(result.y).toBe(6332);
+    });
+
+    it("handles prime meridian and equator", () => {
+      const result = latLngToTile(0, 0, 10);
+      const n = 2 ** 10;
+      expect(result.x).toBe(Math.floor(n / 2)); // Should be at center x
+      expect(result.y).toBe(Math.floor(n / 2)); // Should be at center y
+    });
+
+    it("handles negative longitudes (Western hemisphere)", () => {
+      const result = latLngToTile(40.7128, -74.006, 10); // New York
+      expect(result.x).toBeGreaterThan(0);
+      expect(result.x).toBeLessThan(2 ** 10);
+    });
+  });
+
+  describe("tileToLatLng", () => {
+    it("converts tile back to coordinates", () => {
+      const tile = { x: 2620, y: 6332 };
+      const result = tileToLatLng(tile.x, tile.y, 14);
+      // Should be near San Francisco
+      expect(result.lat).toBeCloseTo(37.78, 1);
+      expect(result.lng).toBeCloseTo(-122.45, 1);
+    });
+
+    it("returns expected values for known tiles", () => {
+      // Top-left corner of the world at any zoom
+      const corner = tileToLatLng(0, 0, 1);
+      expect(corner.lng).toBe(-180);
+      expect(corner.lat).toBeCloseTo(85.05, 1); // Web Mercator max lat
+    });
+  });
+
+  describe("getTilesForBounds", () => {
+    it("returns correct number of tiles for small area", () => {
+      const bounds: Bounds = {
+        north: 37.78,
+        south: 37.77,
+        east: -122.40,
+        west: -122.42,
+      };
+      const tiles = getTilesForBounds(bounds, 14);
+      // Small area should be covered by 1-4 tiles at zoom 14
+      expect(tiles.length).toBeGreaterThanOrEqual(1);
+      expect(tiles.length).toBeLessThanOrEqual(4);
+    });
+
+    it("returns tiles in row-major order", () => {
+      const bounds: Bounds = {
+        north: 38.0,
+        south: 37.5,
+        east: -122.0,
+        west: -122.5,
+      };
+      const tiles = getTilesForBounds(bounds, 10);
+      // Verify tiles are ordered correctly (top-to-bottom, left-to-right within each row)
+      for (let i = 1; i < tiles.length; i++) {
+        const prev = tiles[i - 1];
+        const curr = tiles[i];
+        // Either same row and x increased, or new row
+        const sameRow = curr.y === prev.y;
+        if (sameRow) {
+          expect(curr.x).toBeGreaterThan(prev.x);
+        } else {
+          expect(curr.y).toBeGreaterThan(prev.y);
+        }
+      }
+    });
+  });
+});
+
+describe("decodeTerrarium", () => {
+  it("decodes Terrarium format correctly", () => {
+    // Create mock ImageData with known values
+    // Terrarium formula: elevation = (red * 256 + green + blue / 256) - 32768
+    // For elevation 0: (128 * 256 + 0) - 32768 = 32768 - 32768 = 0
+    // For elevation 1000: (131 * 256 + 232) - 32768 = 33768 - 32768 = 1000
+    // For elevation -100: (127 * 256 + 156) - 32768 = 32668 - 32768 = -100
+    // For elevation 5000: (147 * 256 + 136) - 32768 = 37768 - 32768 = 5000
+    const width = 2;
+    const height = 2;
+    const data = new Uint8ClampedArray([
+      // Pixel 0: elevation 0
+      128, 0, 0, 255,
+      // Pixel 1: elevation 1000
+      131, 232, 0, 255,
+      // Pixel 2: elevation -100
+      127, 156, 0, 255,
+      // Pixel 3: elevation 5000
+      147, 136, 0, 255,
+    ]);
+    
+    const imageData = { data, width, height } as ImageData;
+    const elevations = decodeTerrarium(imageData);
+    
+    expect(elevations.length).toBe(4);
+    expect(elevations[0]).toBeCloseTo(0, 1);
+    expect(elevations[1]).toBeCloseTo(1000, 1);
+    expect(elevations[2]).toBeCloseTo(-100, 1);
+    expect(elevations[3]).toBeCloseTo(5000, 1);
   });
 });

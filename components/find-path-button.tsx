@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
-import { type AzimuthData, type Bounds, cacheAzimuths, getAzimuthsWithContainsCheck, getDEMWithContainsCheck } from "@/lib/dem-cache";
+import { type AzimuthData, type Bounds, type ElevationGrid, cacheAzimuths, getAzimuthsWithContainsCheck, getDEMWithContainsCheck } from "@/lib/dem-cache";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
@@ -123,7 +123,7 @@ interface FindPathButtonProps {
 
 // Worker message types
 interface WorkerRequest {
-  type: "find_path" | "compute_azimuths";
+  type: "find_path" | "compute_azimuths" | "compute_azimuths_from_array";
   id: string;
   [key: string]: unknown;
 }
@@ -290,12 +290,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           let azimuthResult = await getAzimuthsWithContainsCheck(preloadBounds, excludedAspects);
           
           if (!azimuthResult) {
-            // Fetch DEM data
-            console.log('[Preload] Fetching DEM for azimuths...');
-            const demData = await getDEMWithContainsCheck(preloadBounds);
+            // Fetch DEM data from AWS Terrain Tiles
+            console.log('[Preload] Fetching DEM from AWS Terrain Tiles...');
+            const demGrid: ElevationGrid = await getDEMWithContainsCheck(preloadBounds);
             
-            // Compute azimuths
-            console.log('[Preload] Computing azimuths...');
+            // Compute azimuths from array (new approach)
+            console.log('[Preload] Computing azimuths from array...');
             azimuthResult = await new Promise<AzimuthData>((resolve, reject) => {
               const id = `preload_azimuths_${Date.now()}`;
               
@@ -318,9 +318,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               
               worker.addEventListener("message", handler);
               worker.postMessage({
-                type: "compute_azimuths",
+                type: "compute_azimuths_from_array",
                 id,
-                elevationsGeotiff: new Uint8Array(demData),
+                elevations: demGrid.data,
+                width: demGrid.width,
+                height: demGrid.height,
+                bounds: demGrid.bounds,
                 excludedAspects,
               } as WorkerRequest);
             });
@@ -389,19 +392,19 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           azimuthResult = await getAzimuthsWithContainsCheck(bounds, excludedAspects);
           
           if (!azimuthResult) {
-            // Fetch DEM data (with caching - will use preloaded expanded region if available)
-            toast.message("Downloading DEM from OpenTopo...", { 
+            // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
+            toast.message("Downloading elevation data...", { 
               id: loadingToastId, 
               duration: Number.POSITIVE_INFINITY 
             });
             
-            const demData = await getDEMWithContainsCheck(bounds, {
+            const demGrid: ElevationGrid = await getDEMWithContainsCheck(bounds, {
               onProgress: (message) => {
                 toast.message(message, { id: loadingToastId, duration: Number.POSITIVE_INFINITY });
               }
             });
             
-            // Compute azimuths (copy demData since postMessage can detach ArrayBuffer)
+            // Compute azimuths from array
             toast.message("Computing azimuths and gradients...", { 
               id: loadingToastId, 
               duration: Number.POSITIVE_INFINITY 
@@ -429,9 +432,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               
               worker.addEventListener("message", handler);
               worker.postMessage({
-                type: "compute_azimuths",
+                type: "compute_azimuths_from_array",
                 id,
-                elevationsGeotiff: new Uint8Array(demData),
+                elevations: demGrid.data,
+                width: demGrid.width,
+                height: demGrid.height,
+                bounds: demGrid.bounds,
                 excludedAspects,
               } as WorkerRequest);
             });

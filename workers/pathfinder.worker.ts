@@ -5,7 +5,7 @@
  * Sends exploration updates back to main thread for visualization.
  */
 
-import wasmInit, { find_path_rs, compute_azimuths, init as initPanicHook } from '../pathfinder/pkg/pathfinder';
+import wasmInit, { find_path_rs, compute_azimuths, compute_azimuths_from_array, array_to_geotiff, init as initPanicHook } from '../pathfinder/pkg/pathfinder';
 
 // Types for messages
 export interface PathfinderRequest {
@@ -28,6 +28,25 @@ export interface ComputeAzimuthsRequest {
   type: 'compute_azimuths';
   id: string;
   elevationsGeotiff: Uint8Array;
+  excludedAspects: string[];
+}
+
+/**
+ * New message type for computing azimuths from raw elevation arrays (AWS Terrain Tiles).
+ * This bypasses GeoTIFF parsing for better performance.
+ */
+export interface ComputeAzimuthsFromArrayRequest {
+  type: 'compute_azimuths_from_array';
+  id: string;
+  elevations: Float32Array;
+  width: number;
+  height: number;
+  bounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
   excludedAspects: string[];
 }
 
@@ -59,7 +78,7 @@ export interface ErrorResult {
   message: string;
 }
 
-export type WorkerRequest = PathfinderRequest | ComputeAzimuthsRequest;
+export type WorkerRequest = PathfinderRequest | ComputeAzimuthsRequest | ComputeAzimuthsFromArrayRequest;
 export type WorkerResponse = ExplorationUpdate | PathResult | AzimuthsResult | ErrorResult;
 
 let wasmInitialized = false;
@@ -272,6 +291,95 @@ async function handleComputeAzimuths(request: ComputeAzimuthsRequest): Promise<v
 }
 
 /**
+ * Handle azimuth computation request from raw elevation array (AWS Terrain Tiles).
+ * This is more efficient than GeoTIFF parsing for tile-based elevation data.
+ */
+async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayRequest): Promise<void> {
+  const { id, elevations, width, height, bounds, excludedAspects } = request;
+  
+  try {
+    console.log('[Worker] Starting array-based azimuth computation:', { width, height, bounds });
+    
+    // Validate buffer isn't detached
+    if (elevations.buffer.byteLength === 0) {
+      throw new Error('elevations buffer is detached');
+    }
+    
+    await ensureWasmInit();
+    console.log('[Worker] WASM initialized for array-based azimuths');
+    
+    // Compute azimuths from raw array
+    const arrayResult = compute_azimuths_from_array(elevations, width, height, excludedAspects ?? []);
+    console.log('[Worker] Array azimuths computed:', {
+      elevationsLength: arrayResult.elevations.length,
+      azimuthsLength: arrayResult.azimuths.length,
+      gradientsLength: arrayResult.gradients.length,
+      runoutZonesLength: arrayResult.runout_zones?.length,
+      width: arrayResult.width,
+      height: arrayResult.height
+    });
+    
+    // Convert results to GeoTIFF format for compatibility with existing visualization code
+    const elevationsGeotiff = array_to_geotiff(
+      arrayResult.elevations,
+      arrayResult.width,
+      arrayResult.height,
+      bounds.west,
+      bounds.north,
+      bounds.east,
+      bounds.south
+    );
+    
+    const azimuthsGeotiff = array_to_geotiff(
+      arrayResult.azimuths,
+      arrayResult.width,
+      arrayResult.height,
+      bounds.west,
+      bounds.north,
+      bounds.east,
+      bounds.south
+    );
+    
+    const gradientsGeotiff = array_to_geotiff(
+      arrayResult.gradients,
+      arrayResult.width,
+      arrayResult.height,
+      bounds.west,
+      bounds.north,
+      bounds.east,
+      bounds.south
+    );
+    
+    const runoutZonesGeotiff = array_to_geotiff(
+      arrayResult.runout_zones,
+      arrayResult.width,
+      arrayResult.height,
+      bounds.west,
+      bounds.north,
+      bounds.east,
+      bounds.south
+    );
+    
+    self.postMessage({
+      type: 'azimuths_result',
+      id,
+      elevations: new Uint8Array(elevationsGeotiff),
+      azimuths: new Uint8Array(azimuthsGeotiff),
+      gradients: new Uint8Array(gradientsGeotiff),
+      runout_zones: new Uint8Array(runoutZonesGeotiff)
+    } satisfies AzimuthsResult);
+    
+  } catch (error) {
+    console.error('[Worker] Array azimuth computation error:', error);
+    self.postMessage({
+      type: 'error',
+      id,
+      message: error instanceof Error ? error.message : 'Unknown error computing azimuths from array'
+    } satisfies ErrorResult);
+  }
+}
+
+/**
  * Message handler
  */
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -283,6 +391,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       break;
     case 'compute_azimuths':
       await handleComputeAzimuths(request);
+      break;
+    case 'compute_azimuths_from_array':
+      await handleComputeAzimuthsFromArray(request);
       break;
   }
 };

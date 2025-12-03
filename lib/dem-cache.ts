@@ -1,8 +1,9 @@
 /**
  * DEM Cache Service
  * 
- * Client-side caching for DEM (Digital Elevation Model) GeoTIFF data using IndexedDB.
- * Fetches from the /api/dem proxy endpoint which keeps the OpenTopo API key server-side.
+ * Client-side caching for DEM (Digital Elevation Model) data using IndexedDB.
+ * Fetches elevation tiles from AWS Terrain Tiles (Terrarium format) and stitches
+ * them into a single elevation grid with proper georeferencing.
  */
 
 const DB_NAME = 'dem-cache';
@@ -17,10 +18,94 @@ export interface Bounds {
   west: number;
 }
 
+/**
+ * Interface for stitched elevation grid with metadata
+ */
+export interface ElevationGrid {
+  data: Float32Array;
+  width: number;
+  height: number;
+  bounds: Bounds;
+}
+
+/**
+ * AWS Terrain Tiles configuration
+ * - Zoom 14 provides ~10m resolution (comparable to USGS10m)
+ * - Each tile is 256x256 pixels
+ * - Terrarium format: elevation = (red * 256 + green + blue / 256) - 32768
+ */
+const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium';
+const TERRAIN_TILE_ZOOM = 14;
+const TERRAIN_TILE_SIZE = 256;
+
+// ============ TILE COORDINATE UTILITIES ============
+
+/**
+ * Convert latitude/longitude to tile coordinates at a given zoom level.
+ * Uses Web Mercator projection (EPSG:3857).
+ */
+export function latLngToTile(lat: number, lng: number, zoom: number): { x: number; y: number } {
+  const n = 2 ** zoom;
+  const x = Math.floor((lng + 180) / 360 * n);
+  const latRad = lat * Math.PI / 180;
+  const y = Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n);
+  return { x, y };
+}
+
+/**
+ * Convert tile coordinates to the northwest corner latitude/longitude.
+ */
+export function tileToLatLng(x: number, y: number, zoom: number): { lat: number; lng: number } {
+  const n = 2 ** zoom;
+  const lng = x / n * 360 - 180;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+  const lat = latRad * 180 / Math.PI;
+  return { lat, lng };
+}
+
+/**
+ * Get all tile coordinates that cover a bounding box at a given zoom level.
+ * Returns tiles in row-major order (left-to-right, top-to-bottom).
+ */
+export function getTilesForBounds(bounds: Bounds, zoom: number): { x: number; y: number }[] {
+  const nw = latLngToTile(bounds.north, bounds.west, zoom);
+  const se = latLngToTile(bounds.south, bounds.east, zoom);
+  
+  const tiles: { x: number; y: number }[] = [];
+  for (let y = nw.y; y <= se.y; y++) {
+    for (let x = nw.x; x <= se.x; x++) {
+      tiles.push({ x, y });
+    }
+  }
+  return tiles;
+}
+
+/**
+ * Decode Terrarium format PNG elevation data.
+ * Formula: elevation = (red * 256 + green + blue / 256) - 32768
+ * Note: JS operator precedence means this is evaluated as: ((red * 256) + green + (blue / 256)) - 32768
+ * Returns elevation values in meters as Float32Array.
+ */
+export function decodeTerrarium(imageData: ImageData): Float32Array {
+  const { data, width, height } = imageData;
+  const elevations = new Float32Array(width * height);
+  
+  for (let i = 0; i < width * height; i++) {
+    const r = data[i * 4];
+    const g = data[i * 4 + 1];
+    const b = data[i * 4 + 2];
+    elevations[i] = (r * 256 + g + b / 256) - 32768;
+  }
+  
+  return elevations;
+}
+
 interface CachedTile {
   key: string;
   bounds: Bounds;
-  data: ArrayBuffer;
+  data: ArrayBuffer;  // Float32Array as ArrayBuffer
+  width: number;
+  height: number;
   timestamp: number;
 }
 
@@ -118,7 +203,7 @@ function openDB(): Promise<IDBDatabase> {
 /**
  * Get cached DEM tile
  */
-async function getCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
+async function getCachedTile(bounds: Bounds): Promise<ElevationGrid | null> {
   try {
     const db = await openDB();
     const key = boundsToKey(bounds);
@@ -131,7 +216,16 @@ async function getCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
         const result = request.result as CachedTile | undefined;
-        resolve(result?.data || null);
+        if (result) {
+          resolve({
+            data: new Float32Array(result.data),
+            width: result.width,
+            height: result.height,
+            bounds: result.bounds,
+          });
+        } else {
+          resolve(null);
+        }
       };
     });
   } catch {
@@ -140,17 +234,19 @@ async function getCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
 }
 
 /**
- * Cache DEM tile
+ * Cache DEM tile (ElevationGrid)
  */
-async function cacheTile(bounds: Bounds, data: ArrayBuffer): Promise<void> {
+async function cacheTile(grid: ElevationGrid): Promise<void> {
   try {
     const db = await openDB();
-    const key = boundsToKey(bounds);
+    const key = boundsToKey(grid.bounds);
     
     const tile: CachedTile = {
       key,
-      bounds,
-      data,
+      bounds: grid.bounds,
+      data: grid.data.buffer as ArrayBuffer,
+      width: grid.width,
+      height: grid.height,
       timestamp: Date.now(),
     };
     
@@ -168,45 +264,115 @@ async function cacheTile(bounds: Bounds, data: ArrayBuffer): Promise<void> {
 }
 
 /**
- * Fetch DEM data from server (via proxy)
+ * Fetch a single terrain tile from AWS S3 and decode its elevation data.
  */
-async function fetchDEM(bounds: Bounds, dataset = 'USGS10m'): Promise<ArrayBuffer> {
-  const params = new URLSearchParams({
-    north: bounds.north.toString(),
-    south: bounds.south.toString(),
-    east: bounds.east.toString(),
-    west: bounds.west.toString(),
-    dataset,
-  });
+async function fetchTerrainTile(x: number, y: number, zoom: number): Promise<Float32Array> {
+  const url = `${TERRAIN_TILE_URL}/${zoom}/${x}/${y}.png`;
   
-  const response = await fetch(`/api/dem?${params}`);
-  
+  const response = await fetch(url);
   if (!response.ok) {
-    // Try to get error details from response body
-    let errorDetail = response.statusText;
-    try {
-      const errorJson = await response.json();
-      errorDetail = errorJson.error || errorDetail;
-    } catch {
-      // Response wasn't JSON, use statusText
-    }
-    throw new Error(`Failed to fetch DEM: ${errorDetail}`);
+    throw new Error(`Failed to fetch terrain tile ${zoom}/${x}/${y}: ${response.status}`);
   }
   
-  return response.arrayBuffer();
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+  
+  // Use OffscreenCanvas to extract pixel data
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Failed to get 2D context');
+  }
+  
+  ctx.drawImage(bitmap, 0, 0);
+  const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+  
+  return decodeTerrarium(imageData);
 }
 
 /**
- * Get DEM data for bounds, using cache if available
+ * Fetch DEM data from AWS Terrain Tiles and stitch into a single elevation grid.
+ * Fetches all tiles that cover the bounding box and stitches them together.
+ */
+async function fetchDEM(
+  bounds: Bounds,
+  onProgress?: (message: string) => void
+): Promise<ElevationGrid> {
+  const zoom = TERRAIN_TILE_ZOOM;
+  const tiles = getTilesForBounds(bounds, zoom);
+  
+  if (tiles.length === 0) {
+    throw new Error('No tiles found for bounds');
+  }
+  
+  onProgress?.(`Downloading ${tiles.length} elevation tile(s)...`);
+  
+  // Calculate grid dimensions
+  const minX = Math.min(...tiles.map(t => t.x));
+  const maxX = Math.max(...tiles.map(t => t.x));
+  const minY = Math.min(...tiles.map(t => t.y));
+  const maxY = Math.max(...tiles.map(t => t.y));
+  
+  const tilesWide = maxX - minX + 1;
+  const tilesHigh = maxY - minY + 1;
+  
+  // Fetch all tiles in parallel
+  const tilePromises = tiles.map(tile => 
+    fetchTerrainTile(tile.x, tile.y, zoom).then(data => ({
+      x: tile.x - minX,
+      y: tile.y - minY,
+      data,
+    }))
+  );
+  
+  const tileResults = await Promise.all(tilePromises);
+  
+  // Stitch tiles into single grid
+  const gridWidth = tilesWide * TERRAIN_TILE_SIZE;
+  const gridHeight = tilesHigh * TERRAIN_TILE_SIZE;
+  const stitched = new Float32Array(gridWidth * gridHeight);
+  
+  for (const tile of tileResults) {
+    const offsetX = tile.x * TERRAIN_TILE_SIZE;
+    const offsetY = tile.y * TERRAIN_TILE_SIZE;
+    
+    for (let row = 0; row < TERRAIN_TILE_SIZE; row++) {
+      const srcStart = row * TERRAIN_TILE_SIZE;
+      const dstStart = (offsetY + row) * gridWidth + offsetX;
+      stitched.set(tile.data.subarray(srcStart, srcStart + TERRAIN_TILE_SIZE), dstStart);
+    }
+  }
+  
+  // Calculate actual bounds of the stitched grid
+  const nwCorner = tileToLatLng(minX, minY, zoom);
+  const seCorner = tileToLatLng(maxX + 1, maxY + 1, zoom);
+  
+  const gridBounds: Bounds = {
+    north: nwCorner.lat,
+    south: seCorner.lat,
+    east: seCorner.lng,
+    west: nwCorner.lng,
+  };
+  
+  return {
+    data: stitched,
+    width: gridWidth,
+    height: gridHeight,
+    bounds: gridBounds,
+  };
+}
+
+/**
+ * Get DEM data for bounds, using cache if available.
+ * Returns an ElevationGrid with Float32Array elevation data and metadata.
  */
 export async function getDEM(
   bounds: Bounds, 
   options?: { 
-    dataset?: string;
     onProgress?: (message: string) => void;
   }
-): Promise<Uint8Array> {
-  const { dataset = 'USGS10m', onProgress } = options || {};
+): Promise<ElevationGrid> {
+  const { onProgress } = options || {};
   
   // Normalize bounds for consistent caching
   const normalizedBounds = normalizeBounds(bounds);
@@ -220,20 +386,19 @@ export async function getDEM(
   if (cached) {
     console.log('[DEM Cache] Cache HIT');
     onProgress?.('Using cached DEM data');
-    return new Uint8Array(cached);
+    return cached;
   }
   
-  console.log('[DEM Cache] Cache MISS - fetching from server');
-  // Fetch from server
-  onProgress?.('Downloading DEM from OpenTopo...');
-  const data = await fetchDEM(normalizedBounds, dataset);
+  console.log('[DEM Cache] Cache MISS - fetching from AWS Terrain Tiles');
+  // Fetch from AWS S3
+  const grid = await fetchDEM(normalizedBounds, onProgress);
   
   // Cache for next time
   onProgress?.('Caching DEM data...');
-  await cacheTile(normalizedBounds, data);
+  await cacheTile(grid);
   console.log('[DEM Cache] Cached with key:', cacheKey);
   
-  return new Uint8Array(data);
+  return grid;
 }
 
 /**
@@ -256,68 +421,25 @@ export async function clearDEMCache(): Promise<void> {
 }
 
 /**
- * Calculate approximate area in km² from lat/lng bounds
+ * Expand bounds by a factor.
+ * A factor of 3 means the resulting bounds will be 3x the width and height.
+ * Note: No area limits with AWS Terrain Tiles (unlimited free access).
  */
-function calculateAreaKm2(bounds: Bounds): number {
-  const latDiff = bounds.north - bounds.south;
-  const lngDiff = bounds.east - bounds.west;
-  const avgLat = (bounds.north + bounds.south) / 2;
-  // km per degree latitude is ~111
-  const latKm = latDiff * 111;
-  // km per degree longitude varies with latitude
-  const lngKm = lngDiff * 111 * Math.cos(avgLat * Math.PI / 180);
-  return latKm * lngKm;
-}
-
-// Maximum area limits in km² from OpenTopography API docs
-const MAX_AREA_KM2: Record<string, number> = {
-  "USGS1m": 250,
-  "USGS10m": 25000,
-  "USGS30m": 225000,
-};
-
-/**
- * Expand bounds by a factor, limited by OpenTopo API max area
- * A factor of 3 means the resulting bounds will be 3x the width and height
- */
-export function expandBounds(bounds: Bounds, factor: number, dataset = 'USGS10m'): Bounds {
+export function expandBounds(bounds: Bounds, factor: number): Bounds {
   const width = bounds.east - bounds.west;
   const height = bounds.north - bounds.south;
   const centerLon = (bounds.east + bounds.west) / 2;
   const centerLat = (bounds.north + bounds.south) / 2;
   
-  let newWidth = width * factor;
-  let newHeight = height * factor;
+  const newWidth = width * factor;
+  const newHeight = height * factor;
   
-  // Calculate expanded bounds and check area
-  let expandedBounds: Bounds = {
+  return {
     north: centerLat + newHeight / 2,
     south: centerLat - newHeight / 2,
     east: centerLon + newWidth / 2,
     west: centerLon - newWidth / 2,
   };
-  
-  const maxArea = MAX_AREA_KM2[dataset] || 25000;
-  const expandedArea = calculateAreaKm2(expandedBounds);
-  
-  // If too large, reduce expansion factor until it fits
-  if (expandedArea > maxArea) {
-    // Scale down proportionally
-    const scaleFactor = Math.sqrt(maxArea / expandedArea) * 0.95; // 5% safety margin
-    newWidth = width * factor * scaleFactor;
-    newHeight = height * factor * scaleFactor;
-    
-    expandedBounds = {
-      north: centerLat + newHeight / 2,
-      south: centerLat - newHeight / 2,
-      east: centerLon + newWidth / 2,
-      west: centerLon - newWidth / 2,
-    };
-    
-    console.log(`[DEM] Reduced expansion to fit ${dataset} limit of ${maxArea} km²`);
-  }
-  
-  return expandedBounds;
 }
 
 /**
@@ -369,9 +491,9 @@ export async function findCachedBoundsContaining(bounds: Bounds): Promise<Bounds
 
 /**
  * Find a cached tile that contains the requested bounds
- * Returns the cached data if found, null otherwise
+ * Returns the cached ElevationGrid if found, null otherwise
  */
-async function findContainingCachedTile(bounds: Bounds): Promise<ArrayBuffer | null> {
+async function findContainingCachedTile(bounds: Bounds): Promise<ElevationGrid | null> {
   try {
     const db = await openDB();
     
@@ -387,7 +509,12 @@ async function findContainingCachedTile(bounds: Bounds): Promise<ArrayBuffer | n
           const tile = cursor.value as CachedTile;
           if (boundsContain(tile.bounds, bounds)) {
             console.log('[DEM Cache] Found containing tile:', boundsToKey(tile.bounds));
-            resolve(tile.data);
+            resolve({
+              data: new Float32Array(tile.data),
+              width: tile.width,
+              height: tile.height,
+              bounds: tile.bounds,
+            });
             return;
           }
           cursor.continue();
@@ -410,10 +537,9 @@ export async function preloadDEM(
   bounds: Bounds,
   options?: {
     expansionFactor?: number;
-    dataset?: string;
   }
 ): Promise<void> {
-  const { expansionFactor = 3, dataset = 'USGS10m' } = options || {};
+  const { expansionFactor = 3 } = options || {};
   
   // Expand and normalize bounds
   const expandedBounds = expandBounds(bounds, expansionFactor);
@@ -430,8 +556,8 @@ export async function preloadDEM(
   console.log('[DEM Preload] Starting background fetch for:', cacheKey);
   
   try {
-    const data = await fetchDEM(normalizedBounds, dataset);
-    await cacheTile(normalizedBounds, data);
+    const grid = await fetchDEM(normalizedBounds);
+    await cacheTile(grid);
     console.log('[DEM Preload] Cached expanded region:', cacheKey);
   } catch (error) {
     console.warn('[DEM Preload] Failed:', error);
@@ -446,11 +572,10 @@ export async function preloadDEM(
 export async function getDEMWithContainsCheck(
   bounds: Bounds,
   options?: {
-    dataset?: string;
     onProgress?: (message: string) => void;
   }
-): Promise<Uint8Array> {
-  const { dataset = 'USGS10m', onProgress } = options || {};
+): Promise<ElevationGrid> {
+  const { onProgress } = options || {};
   
   const normalizedBounds = normalizeBounds(bounds);
   const cacheKey = boundsToKey(normalizedBounds);
@@ -463,7 +588,7 @@ export async function getDEMWithContainsCheck(
   if (exactCached) {
     console.log('[DEM Cache] Exact cache HIT');
     onProgress?.('Using cached DEM data');
-    return new Uint8Array(exactCached);
+    return exactCached;
   }
   
   // Check for a larger cached tile that contains our bounds
@@ -473,18 +598,17 @@ export async function getDEMWithContainsCheck(
   if (containingCached) {
     console.log('[DEM Cache] Found containing cached tile');
     onProgress?.('Using cached DEM data');
-    return new Uint8Array(containingCached);
+    return containingCached;
   }
   
-  console.log('[DEM Cache] Cache MISS - fetching from server');
-  onProgress?.('Downloading DEM from OpenTopo...');
-  const data = await fetchDEM(normalizedBounds, dataset);
+  console.log('[DEM Cache] Cache MISS - fetching from AWS Terrain Tiles');
+  const grid = await fetchDEM(normalizedBounds, onProgress);
   
   onProgress?.('Caching DEM data...');
-  await cacheTile(normalizedBounds, data);
+  await cacheTile(grid);
   console.log('[DEM Cache] Cached with key:', cacheKey);
   
-  return new Uint8Array(data);
+  return grid;
 }
 
 /**
