@@ -16,8 +16,7 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 
 ## Tech Stack
 
-- **Framework**: React 19, Next.js 15 with App Router
-- **Deployment**: Vercel
+- **Framework**: React 19, Next.js 15 with App Router (static export)
 - **State**: Zustand
 - **Styling**: Tailwind CSS, shadcn/ui
 - **Maps**: Leaflet, React Leaflet
@@ -25,13 +24,12 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 - **Rust Integration**: WebAssembly via wasm-bindgen, running in a Web Worker
 - **Pathfinding Algorithm**: A* via pathfinding.rs crate
 - **Terrain Analysis**: Custom Sobel filter for aspect computation
-- **DEM Data**: OpenTopography API (cached in IndexedDB)
+- **DEM Data**: AWS Terrain Tiles (Terrarium format, cached in IndexedDB)
 
 ## Environment Variables
 
 ```bash
-NEXT_PUBLIC_JAWG_ACCESS_TOKEN="" # Jawg Maps tile layer
-OPEN_TOPO_API_KEY="" # OpenTopography DEM data
+NEXT_PUBLIC_JAWG_ACCESS_TOKEN="" # Jawg Maps tile layer (optional, for terrain map display)
 ```
 
 ## Development
@@ -52,12 +50,10 @@ npm run build
 
 ## Architecture
 
-The pathfinding runs entirely client-side:
-1. DEM tiles are fetched via `/api/dem` proxy (keeps API key secret)
-2. Tiles are cached in IndexedDB for offline/repeat use
+The application runs entirely client-side with no server dependencies:
+1. DEM tiles are fetched directly from AWS S3-hosted Terrain Tiles (Terrarium format)
+2. Tiles are decoded, stitched, and cached in IndexedDB for offline/repeat use
 3. WASM module runs in a Web Worker for non-blocking UI
 4. Exploration updates stream back to main thread for real-time visualization
 
-## Deployment
-
-The app is deployed to Vercel. The WASM module is built during the Vercel build process.
+The static export (`output: 'export'`) enables hosting on any static file server (Netlify, GitHub Pages, S3, etc.).

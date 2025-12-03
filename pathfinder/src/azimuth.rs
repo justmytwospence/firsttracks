@@ -36,6 +36,51 @@ impl AzimuthResult {
   }
 }
 
+/// Result struct for array-based azimuth computation (without GeoTIFF serialization)
+#[wasm_bindgen]
+pub struct AzimuthArrayResult {
+  elevations: Vec<f32>,
+  azimuths: Vec<f32>,
+  gradients: Vec<f32>,
+  runout_zones: Vec<f32>,
+  width: u32,
+  height: u32,
+}
+
+#[wasm_bindgen]
+impl AzimuthArrayResult {
+  #[wasm_bindgen(getter)]
+  pub fn elevations(&self) -> Vec<f32> {
+    self.elevations.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn azimuths(&self) -> Vec<f32> {
+    self.azimuths.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn gradients(&self) -> Vec<f32> {
+    self.gradients.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn runout_zones(&self) -> Vec<f32> {
+    self.runout_zones.clone()
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn width(&self) -> u32 {
+    self.width
+  }
+
+  #[wasm_bindgen(getter)]
+  pub fn height(&self) -> u32 {
+    self.height
+  }
+}
+
+
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Aspect {
@@ -450,5 +495,105 @@ pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) ->
     azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin)?,
     gradients: serialize_to_geotiff(gradients, &geo_keys, &origin)?,
     runout_zones: runout_zones_geotiff_bytes,
+  })
+}
+
+/// Compute azimuths from raw elevation array (Float32Array) instead of GeoTIFF.
+/// This is more efficient for AWS Terrain Tiles which are already decoded as Float32Array.
+/// Returns raw Float32Array data for elevations, azimuths, gradients, and runout zones.
+#[wasm_bindgen]
+pub fn compute_azimuths_from_array(
+  elevations_flat: &[f32],
+  width: u32,
+  height: u32,
+  excluded_aspects: JsValue,
+) -> Result<AzimuthArrayResult, JsValue> {
+  let width = width as usize;
+  let height = height as usize;
+  
+  // Validate input size
+  if elevations_flat.len() != width * height {
+    return Err(JsValue::from_str(&format!(
+      "Elevation array size {} doesn't match dimensions {}x{}={}",
+      elevations_flat.len(), width, height, width * height
+    )));
+  }
+  
+  // Parse excluded aspects from JS value
+  let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
+    vec![]
+  } else {
+    serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
+  };
+
+  // Convert flat array to 2D Vec<Vec<f64>> for processing
+  let elevations: Vec<Vec<f64>> = (0..height)
+    .map(|row| {
+      (0..width)
+        .map(|col| elevations_flat[row * width + col] as f64)
+        .collect()
+    })
+    .collect();
+
+  let gx_kernel: [[f64; 5]; 5] = [
+    [-5.0, -4.0, 0.0, 4.0, 5.0],
+    [-8.0, -10.0, 0.0, 10.0, 8.0],
+    [-10.0, -20.0, 0.0, 20.0, 10.0],
+    [-8.0, -10.0, 0.0, 10.0, 8.0],
+    [-5.0, -4.0, 0.0, 4.0, 5.0],
+  ];
+
+  let gy_kernel: [[f64; 5]; 5] = [
+    [-5.0, -8.0, -10.0, -8.0, -5.0],
+    [-4.0, -10.0, -20.0, -10.0, -4.0],
+    [0.0, 0.0, 0.0, 0.0, 0.0],
+    [4.0, 10.0, 20.0, 10.0, 4.0],
+    [5.0, 8.0, 10.0, 8.0, 5.0],
+  ];
+
+  let mut azimuths: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
+  let mut gradients: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
+
+  // Apply convolution
+  for i in 2..(height - 2) {
+    for j in 2..(width - 2) {
+      let mut gx: f64 = 0.0;
+      let mut gy: f64 = 0.0;
+
+      // Apply the 5x5 kernel
+      for ki in 0..5 {
+        for kj in 0..5 {
+          let x: usize = j + kj - 2;
+          let y: usize = i + ki - 2;
+          let pixel_value: f64 = elevations[y][x];
+
+          gx += pixel_value * gx_kernel[ki][kj];
+          gy += pixel_value * gy_kernel[ki][kj];
+        }
+      }
+
+      // Compute azimuth for the current pixel
+      let azimuth: f64 = calculate_azimuth(gx, gy);
+      azimuths[i][j] = azimuth;
+      gradients[i][j] = compute_gradient_along_azimuth(gx, gy, azimuth);
+    }
+  }
+
+  // Compute runout zones based on excluded aspects
+  let runout_zones = compute_runout_zones(&elevations, &azimuths, &gradients, &excluded_aspects_vec);
+
+  // Flatten all 2D arrays to 1D Vec<f32>
+  let elevations_flat: Vec<f32> = elevations.into_iter().flatten().map(|x| x as f32).collect();
+  let azimuths_flat: Vec<f32> = azimuths.into_iter().flatten().map(|x| x as f32).collect();
+  let gradients_flat: Vec<f32> = gradients.into_iter().flatten().map(|x| x as f32).collect();
+  let runout_zones_flat: Vec<f32> = runout_zones.into_iter().flatten().map(|x| x as f32).collect();
+
+  Ok(AzimuthArrayResult {
+    elevations: elevations_flat,
+    azimuths: azimuths_flat,
+    gradients: gradients_flat,
+    runout_zones: runout_zones_flat,
+    width: width as u32,
+    height: height as u32,
   })
 }
