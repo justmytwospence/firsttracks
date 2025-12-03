@@ -218,6 +218,7 @@ class SmoothRasterOverlay extends L.Layer {
     const { xmin, ymax, pixelWidth, pixelHeight, values, width, height } = this.raster;
     const azimuthValues = values[0]; // First band is azimuths
     const gradientValues = values[1]; // Second band is gradients
+    const runoutValues = values[2]; // Third band is runout zones (may be undefined)
 
     // Get map bounds in geographic coordinates
     const west = bounds.getWest();
@@ -245,6 +246,21 @@ class SmoothRasterOverlay extends L.Layer {
           continue;
         }
 
+        const pixelIndex = (screenY * size.x + screenX) * 4;
+        
+        // Check for runout zone first (renders in amber/orange)
+        if (runoutValues) {
+          const runoutValue = bilinearInterpolate(runoutValues, rasterX, rasterY, width, height);
+          if (runoutValue > 0.5) {
+            // Runout zone - render in amber (rgba(245, 158, 11, 0.5))
+            data[pixelIndex] = 245;     // Red
+            data[pixelIndex + 1] = 158; // Green
+            data[pixelIndex + 2] = 11;  // Blue
+            data[pixelIndex + 3] = Math.round(0.5 * 255); // Alpha (50%)
+            continue; // Skip aspect rendering for runout pixels
+          }
+        }
+
         // Use bilinear interpolation of intensities (not raw azimuths) for smooth results
         const { intensity, gradient } = getInterpolatedAspectIntensity(
           azimuthValues,
@@ -261,7 +277,6 @@ class SmoothRasterOverlay extends L.Layer {
           const baseOpacity = Math.min(gradient * 0.4, 0.8);
           const opacity = baseOpacity * intensity;
 
-          const pixelIndex = (screenY * size.x + screenX) * 4;
           data[pixelIndex] = 255;     // Red
           data[pixelIndex + 1] = 0;   // Green
           data[pixelIndex + 2] = 0;   // Blue

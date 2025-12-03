@@ -501,7 +501,7 @@ export default function PathFinderPage() {
   }, [pathSegmentBoundaries, waypointIds, waypoints.length]);
 
   const handleSetAspectRaster = useCallback(
-    async (azimuths: Uint8Array, gradients: Uint8Array) => {
+    async (azimuths: Uint8Array, gradients: Uint8Array, runoutZones?: Uint8Array) => {
       const azimuthRaster = (await parseGeoraster(
         azimuths.buffer as ArrayBuffer
       )) as GeoRaster;
@@ -510,7 +510,17 @@ export default function PathFinderPage() {
         gradients.buffer as ArrayBuffer
       )) as GeoRaster;
 
-      const mergedRaster = [azimuthRaster, gradientRaster].reduce(
+      const rastersToMerge = [azimuthRaster, gradientRaster];
+      
+      // Add runout zones raster if provided
+      if (runoutZones) {
+        const runoutRaster = (await parseGeoraster(
+          runoutZones.buffer as ArrayBuffer
+        )) as GeoRaster;
+        rastersToMerge.push(runoutRaster);
+      }
+
+      const mergedRaster = rastersToMerge.reduce(
         (result, georaster) => ({
           ...georaster,
           maxs: [...result.maxs, ...georaster.maxs],

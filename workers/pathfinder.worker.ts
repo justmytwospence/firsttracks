@@ -21,12 +21,14 @@ export interface PathfinderRequest {
   aspectGradientThreshold: number | null;
   explorationBatchSize?: number;
   explorationDelayMs?: number;
+  runoutZonesBuffer?: Uint8Array;
 }
 
 export interface ComputeAzimuthsRequest {
   type: 'compute_azimuths';
   id: string;
   elevationsGeotiff: Uint8Array;
+  excludedAspects: string[];
 }
 
 export interface ExplorationUpdate {
@@ -48,6 +50,7 @@ export interface AzimuthsResult {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
+  runout_zones: Uint8Array;
 }
 
 export interface ErrorResult {
@@ -108,7 +111,8 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     gradientsBuffer,
     aspectGradientThreshold,
     explorationBatchSize = 125,
-    explorationDelayMs = 0
+    explorationDelayMs = 0,
+    runoutZonesBuffer
   } = request;
   
   try {
@@ -143,6 +147,7 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
       elevationsBufferLength: elevationsBuffer.length,
       azimuthsBufferLength: azimuthsBuffer.length,
       gradientsBufferLength: gradientsBuffer.length,
+      runoutZonesBufferLength: runoutZonesBuffer?.length,
       startGeoJson,
       endGeoJson,
       excludedAspects,
@@ -159,7 +164,8 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
       gradientsBuffer,
       aspectGradientThreshold,
       explorationCallback,
-      explorationBatchSize
+      explorationBatchSize,
+      runoutZonesBuffer ?? null
     );
     
     console.log('[Worker] Path found, result length:', resultJson.length);
@@ -199,18 +205,19 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
  * Handle azimuth computation request
  */
 async function handleComputeAzimuths(request: ComputeAzimuthsRequest): Promise<void> {
-  const { id, elevationsGeotiff } = request;
+  const { id, elevationsGeotiff, excludedAspects } = request;
   
   try {
     console.log('[Worker] Starting azimuth computation, buffer length:', elevationsGeotiff.length);
     await ensureWasmInit();
     console.log('[Worker] WASM initialized for azimuths');
     
-    const result = compute_azimuths(elevationsGeotiff);
+    const result = compute_azimuths(elevationsGeotiff, excludedAspects);
     console.log('[Worker] Azimuths computed:', {
       elevationsLength: result.elevations.length,
       azimuthsLength: result.azimuths.length,
-      gradientsLength: result.gradients.length
+      gradientsLength: result.gradients.length,
+      runoutZonesLength: result.runout_zones.length
     });
     
     self.postMessage({
@@ -218,7 +225,8 @@ async function handleComputeAzimuths(request: ComputeAzimuthsRequest): Promise<v
       id,
       elevations: result.elevations,
       azimuths: result.azimuths,
-      gradients: result.gradients
+      gradients: result.gradients,
+      runout_zones: result.runout_zones
     } satisfies AzimuthsResult);
     
   } catch (error) {

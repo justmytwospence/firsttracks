@@ -33,6 +33,7 @@ export interface AzimuthsResult {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
+  runout_zones: Uint8Array;
 }
 
 interface PendingRequest {
@@ -222,7 +223,8 @@ export function usePathfinder() {
    * Compute azimuths from elevation GeoTIFF
    */
   const computeAzimuths = useCallback(async (
-    elevationsGeotiff: Uint8Array
+    elevationsGeotiff: Uint8Array,
+    excludedAspects: string[] = []
   ): Promise<AzimuthsResult> => {
     const id = generateId();
     
@@ -236,6 +238,7 @@ export function usePathfinder() {
       type: 'compute_azimuths',
       id,
       elevationsGeotiff,
+      excludedAspects,
     };
     
     return sendRequest<AzimuthsResult>(request);
