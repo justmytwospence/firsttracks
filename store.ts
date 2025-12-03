@@ -64,7 +64,7 @@ export const aspectStore = createAspectStore();
 export const createSlopeUnitStore = () => create<SlopeUnitState>()(
   persist(
     subscribeWithSelector((set) => ({
-      useDegrees: false,
+      useDegrees: true,
       setUseDegrees: (useDegrees) => set({ useDegrees }),
     })),
     {
