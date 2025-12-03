@@ -199,6 +199,21 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       }
     }, [waypoints.length, setIsLoading, isLoading]);
     
+    // Invalidate cached azimuths when excluded aspects change (runout zones depend on aspects)
+    const prevExcludedAspectsRef = useRef<Aspect[]>(excludedAspects);
+    useEffect(() => {
+      // Compare excluded aspects by joining their values
+      const prevKey = prevExcludedAspectsRef.current.sort().join(',');
+      const currentKey = excludedAspects.slice().sort().join(',');
+      
+      if (prevKey !== currentKey) {
+        // Aspects changed - invalidate cached azimuths to force recomputation with new runout zones
+        cachedAzimuthsRef.current = null;
+        lastPreloadedBoundsRef.current = null;
+        prevExcludedAspectsRef.current = excludedAspects;
+      }
+    }, [excludedAspects]);
+    
     // Process exploration queue - skip more batches as iteration count increases
     const processExplorationQueue = useCallback(async () => {
       if (processingRef.current) return;
