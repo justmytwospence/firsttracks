@@ -1,4 +1,4 @@
-import type { Aspect } from "@/components/ui/select-aspects-dialog";
+import type { Aspect } from "@/components/ui/aspect-selector";
 import type { GeoRaster } from "georaster";
 import L from "leaflet";
 import { useEffect, useRef } from "react";
