@@ -174,14 +174,12 @@ fn compute_runout_zones(
         continue;
       }
       
-      // This is a source zone - follow steepest descent
+      // This is a source zone - follow steepest descent to mark runout BELOW it
+      // Note: The source zone itself is NOT marked as runout (it shows as red aspect shading)
       let mut current_y = i;
       let mut current_x = j;
       
       loop {
-        // Mark current cell as runout
-        runout[current_y][current_x] = 1.0;
-        
         // Find neighbor with lowest elevation
         let mut min_elevation = elevations[current_y][current_x];
         let mut next_y = current_y;
@@ -211,9 +209,10 @@ fn compute_runout_zones(
           break;
         }
         
-        // Move to next cell
+        // Move to next cell and mark it as runout
         current_y = next_y;
         current_x = next_x;
+        runout[current_y][current_x] = 1.0;
       }
     }
   }
