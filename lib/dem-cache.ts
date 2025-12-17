@@ -42,6 +42,13 @@ const TERRAIN_TILE_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrariu
 const TERRAIN_TILE_ZOOM = 14;
 const TERRAIN_TILE_SIZE = 256;
 
+/**
+ * Maximum number of tiles that can be fetched for a single request.
+ * 400 tiles = 20x20 grid = 5120x5120 pixels ≈ 100MB Float32Array.
+ * This prevents browser memory exhaustion when requesting large areas.
+ */
+const MAX_TILES = 400;
+
 // ============ TILE COORDINATE UTILITIES ============
 
 /**
@@ -74,6 +81,17 @@ export function tileToLatLng(x: number, y: number, zoom: number): { lat: number;
 export function getTilesForBounds(bounds: Bounds, zoom: number): { x: number; y: number }[] {
   const nw = latLngToTile(bounds.north, bounds.west, zoom);
   const se = latLngToTile(bounds.south, bounds.east, zoom);
+  
+  // Check tile count before allocating array
+  const tilesWide = se.x - nw.x + 1;
+  const tilesHigh = se.y - nw.y + 1;
+  const tileCount = tilesWide * tilesHigh;
+  
+  if (tileCount > MAX_TILES) {
+    throw new Error(
+      `Requested area too large: ${tileCount} tiles required (max: ${MAX_TILES}). Please zoom in or reduce the area.`
+    );
+  }
   
   const tiles: { x: number; y: number }[] = [];
   for (let y = nw.y; y <= se.y; y++) {
@@ -628,9 +646,9 @@ export async function clearDEMCache(): Promise<void> {
 }
 
 /**
- * Expand bounds by a factor.
+ * Expand bounds by a factor, capped to stay within MAX_TILES limit.
  * A factor of 3 means the resulting bounds will be 3x the width and height.
- * Note: No area limits with AWS Terrain Tiles (unlimited free access).
+ * The actual expansion may be reduced if it would exceed tile limits.
  */
 export function expandBounds(bounds: Bounds, factor: number): Bounds {
   const width = bounds.east - bounds.west;
@@ -638,8 +656,16 @@ export function expandBounds(bounds: Bounds, factor: number): Bounds {
   const centerLon = (bounds.east + bounds.west) / 2;
   const centerLat = (bounds.north + bounds.south) / 2;
   
-  const newWidth = width * factor;
-  const newHeight = height * factor;
+  // Calculate current tile count
+  const currentTiles = countTilesForBounds(bounds, TERRAIN_TILE_ZOOM);
+  
+  // If expansion would exceed MAX_TILES, reduce the factor
+  // Area scales with factor^2, so max factor = sqrt(MAX_TILES / currentTiles)
+  const maxFactor = Math.sqrt(MAX_TILES / currentTiles);
+  const cappedFactor = Math.min(factor, maxFactor);
+  
+  const newWidth = width * cappedFactor;
+  const newHeight = height * cappedFactor;
   
   return {
     north: centerLat + newHeight / 2,
@@ -647,6 +673,17 @@ export function expandBounds(bounds: Bounds, factor: number): Bounds {
     east: centerLon + newWidth / 2,
     west: centerLon - newWidth / 2,
   };
+}
+
+/**
+ * Count how many tiles would be needed for bounds without allocating the array.
+ */
+function countTilesForBounds(bounds: Bounds, zoom: number): number {
+  const nw = latLngToTile(bounds.north, bounds.west, zoom);
+  const se = latLngToTile(bounds.south, bounds.east, zoom);
+  const tilesWide = se.x - nw.x + 1;
+  const tilesHigh = se.y - nw.y + 1;
+  return tilesWide * tilesHigh;
 }
 
 /**
