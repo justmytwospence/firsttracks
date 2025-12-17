@@ -4,12 +4,16 @@
  * Client-side caching for DEM (Digital Elevation Model) data using IndexedDB.
  * Fetches elevation tiles from AWS Terrain Tiles (Terrarium format) and stitches
  * them into a single elevation grid with proper georeferencing.
+ * 
+ * Supports tile-level caching for incremental fetching - only fetches tiles
+ * that aren't already cached.
  */
 
 const DB_NAME = 'dem-cache';
-const DB_VERSION = 2;
+const DB_VERSION = 3;  // Bumped for new individual tile store
 const STORE_NAME = 'tiles';
 const AZIMUTHS_STORE_NAME = 'azimuths';
+const INDIVIDUAL_TILES_STORE_NAME = 'individual_tiles';  // New store for z/x/y tiles
 
 export interface Bounds {
   north: number;
@@ -109,14 +113,36 @@ interface CachedTile {
   timestamp: number;
 }
 
+/**
+ * Individual tile cached by z/x/y coordinates
+ */
+interface CachedIndividualTile {
+  key: string;  // Format: "z/x/y"
+  z: number;
+  x: number;
+  y: number;
+  data: ArrayBuffer;  // Float32Array for single tile (256x256)
+  timestamp: number;
+}
+
 interface CachedAzimuths {
   key: string;
   bounds: Bounds;
   elevations: ArrayBuffer;
   azimuths: ArrayBuffer;
   gradients: ArrayBuffer;
+  /** Combined runout zones GeoTIFF */
   runout_zones?: ArrayBuffer;
-  excludedAspects: string[];
+  /** Raw elevation data for lazy runout computation */
+  elevations_raw?: ArrayBuffer;
+  /** Raw azimuth data for lazy runout computation */
+  azimuths_raw?: ArrayBuffer;
+  /** Raw gradient data for lazy runout computation */
+  gradients_raw?: ArrayBuffer;
+  /** Raster width */
+  width?: number;
+  /** Raster height */
+  height?: number;
   timestamp: number;
 }
 
@@ -135,18 +161,13 @@ function boundsToKey(bounds: Bounds): string {
 }
 
 /**
- * Generate a cache key for azimuths that includes excluded aspects.
- * Runout zones depend on which aspects are excluded, so different aspect
- * selections need separate cache entries.
+ * Generate a cache key for azimuths.
+ * Note: excludedAspects parameter is ignored - runout zones are now pre-computed
+ * for all 8 aspects and combined client-side based on selection.
  */
-function azimuthCacheKey(bounds: Bounds, excludedAspects?: string[]): string {
+function azimuthCacheKey(bounds: Bounds, _excludedAspects?: string[]): string {
   const baseKey = boundsToKey(bounds);
-  const aspects = excludedAspects ?? [];
-  // Sort aspects for consistent key regardless of selection order
-  const aspectsKey = aspects.length > 0 
-    ? `_aspects_${[...aspects].sort().join('-')}` 
-    : '';
-  return `${baseKey}${aspectsKey}`;
+  return `${baseKey}_azimuths`;
 }
 
 /**
@@ -171,23 +192,12 @@ function openDB(): Promise<IDBDatabase> {
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
-      // Verify both stores exist, if not we need to delete and recreate
-      if (!db.objectStoreNames.contains(STORE_NAME) || !db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
-        db.close();
-        // Delete and recreate
-        const deleteRequest = indexedDB.deleteDatabase(DB_NAME);
-        deleteRequest.onsuccess = () => {
-          // Recursively call openDB to create fresh database
-          openDB().then(resolve).catch(reject);
-        };
-        deleteRequest.onerror = () => reject(deleteRequest.error);
-        return;
-      }
       resolve(db);
     };
     
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      // Create stores if they don't exist - this preserves existing data
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'key' });
         store.createIndex('timestamp', 'timestamp', { unique: false });
@@ -195,6 +205,10 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
         const azimuthsStore = db.createObjectStore(AZIMUTHS_STORE_NAME, { keyPath: 'key' });
         azimuthsStore.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(INDIVIDUAL_TILES_STORE_NAME)) {
+        const individualTilesStore = db.createObjectStore(INDIVIDUAL_TILES_STORE_NAME, { keyPath: 'key' });
+        individualTilesStore.createIndex('timestamp', 'timestamp', { unique: false });
       }
     };
   });
@@ -290,9 +304,194 @@ async function fetchTerrainTile(x: number, y: number, zoom: number): Promise<Flo
   return decodeTerrarium(imageData);
 }
 
+// ============ INDIVIDUAL TILE CACHING ============
+
+/**
+ * Generate key for individual tile
+ */
+function tileKey(z: number, x: number, y: number): string {
+  return `${z}/${x}/${y}`;
+}
+
+/**
+ * Get a single cached individual tile
+ */
+async function getCachedIndividualTile(z: number, x: number, y: number): Promise<Float32Array | null> {
+  try {
+    const db = await openDB();
+    const key = tileKey(z, x, y);
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
+      const request = store.get(key);
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const result = request.result as CachedIndividualTile | undefined;
+        if (result) {
+          resolve(new Float32Array(result.data));
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cache a single individual tile
+ */
+async function cacheIndividualTile(z: number, x: number, y: number, data: Float32Array): Promise<void> {
+  try {
+    const db = await openDB();
+    const key = tileKey(z, x, y);
+    
+    const cached: CachedIndividualTile = {
+      key,
+      z,
+      x,
+      y,
+      data: data.buffer as ArrayBuffer,
+      timestamp: Date.now(),
+    };
+    
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
+      const request = store.put(cached);
+      
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  } catch {
+    // Caching failed, but that's okay
+  }
+}
+
+/**
+ * Check which tiles from a list are already cached
+ * Returns array of tile keys that are cached
+ */
+async function getCachedTileKeys(tiles: { x: number; y: number }[], zoom: number): Promise<Set<string>> {
+  try {
+    const db = await openDB();
+    const cachedKeys = new Set<string>();
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
+      
+      // Check each tile
+      let completed = 0;
+      for (const tile of tiles) {
+        const key = tileKey(zoom, tile.x, tile.y);
+        const request = store.get(key);
+        
+        request.onsuccess = () => {
+          if (request.result) {
+            cachedKeys.add(key);
+          }
+          completed++;
+          if (completed === tiles.length) {
+            resolve(cachedKeys);
+          }
+        };
+        request.onerror = () => {
+          completed++;
+          if (completed === tiles.length) {
+            resolve(cachedKeys);
+          }
+        };
+      }
+      
+      // Handle empty tiles array
+      if (tiles.length === 0) {
+        resolve(cachedKeys);
+      }
+    });
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Fetch a tile, using cache if available
+ */
+async function fetchTileWithCache(x: number, y: number, zoom: number): Promise<Float32Array> {
+  // Check cache first
+  const cached = await getCachedIndividualTile(zoom, x, y);
+  if (cached) {
+    return cached;
+  }
+  
+  // Fetch from network
+  const data = await fetchTerrainTile(x, y, zoom);
+  
+  // Cache for next time
+  await cacheIndividualTile(zoom, x, y, data);
+  
+  return data;
+}
+
+/**
+ * Get the union bounds of all cached individual tiles.
+ * Used to display cached region on page load.
+ */
+export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
+  try {
+    const db = await openDB();
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
+      const request = store.getAll();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const tiles = request.result as CachedIndividualTile[];
+        if (tiles.length === 0) {
+          resolve(null);
+          return;
+        }
+        
+        // Calculate union bounds from all tiles
+        let minX = Number.POSITIVE_INFINITY;
+        let maxX = Number.NEGATIVE_INFINITY;
+        let minY = Number.POSITIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+        let zoom = TERRAIN_TILE_ZOOM;
+        
+        for (const tile of tiles) {
+          minX = Math.min(minX, tile.x);
+          maxX = Math.max(maxX, tile.x);
+          minY = Math.min(minY, tile.y);
+          maxY = Math.max(maxY, tile.y);
+          zoom = tile.z;  // Assume all tiles are same zoom
+        }
+        
+        // Convert tile coords to bounds
+        const nwCorner = tileToLatLng(minX, minY, zoom);
+        const seCorner = tileToLatLng(maxX + 1, maxY + 1, zoom);
+        
+        resolve({
+          north: nwCorner.lat,
+          south: seCorner.lat,
+          east: seCorner.lng,
+          west: nwCorner.lng,
+        });
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Fetch DEM data from AWS Terrain Tiles and stitch into a single elevation grid.
- * Fetches all tiles that cover the bounding box and stitches them together.
+ * Uses individual tile caching - only fetches tiles that aren't already cached.
  */
 async function fetchDEM(
   bounds: Bounds,
@@ -305,7 +504,15 @@ async function fetchDEM(
     throw new Error('No tiles found for bounds');
   }
   
-  onProgress?.(`Downloading ${tiles.length} elevation tile(s)...`);
+  // Check which tiles are already cached
+  const cachedKeys = await getCachedTileKeys(tiles, zoom);
+  const uncachedTiles = tiles.filter(t => !cachedKeys.has(tileKey(zoom, t.x, t.y)));
+  
+  if (uncachedTiles.length > 0) {
+    onProgress?.(`Downloading ${uncachedTiles.length} of ${tiles.length} elevation tile(s)...`);
+  } else {
+    onProgress?.(`Using ${tiles.length} cached elevation tile(s)`);
+  }
   
   // Calculate grid dimensions
   const minX = Math.min(...tiles.map(t => t.x));
@@ -316,9 +523,9 @@ async function fetchDEM(
   const tilesWide = maxX - minX + 1;
   const tilesHigh = maxY - minY + 1;
   
-  // Fetch all tiles in parallel
+  // Fetch all tiles in parallel (uses cache when available)
   const tilePromises = tiles.map(tile => 
-    fetchTerrainTile(tile.x, tile.y, zoom).then(data => ({
+    fetchTileWithCache(tile.x, tile.y, zoom).then(data => ({
       x: tile.x - minX,
       y: tile.y - minY,
       data,
@@ -452,6 +659,53 @@ export function boundsContain(outer: Bounds, inner: Bounds): boolean {
     outer.east >= inner.east &&
     outer.west <= inner.west
   );
+}
+
+/**
+ * Merge two bounds into a union that contains both
+ */
+export function unionBounds(a: Bounds, b: Bounds): Bounds {
+  return {
+    north: Math.max(a.north, b.north),
+    south: Math.min(a.south, b.south),
+    east: Math.max(a.east, b.east),
+    west: Math.min(a.west, b.west),
+  };
+}
+
+/**
+ * Get all cached DEM tile bounds.
+ * Returns an array of all cached bounds, useful for displaying cached regions on map load.
+ */
+export async function getAllCachedBounds(): Promise<Bounds[]> {
+  try {
+    const db = await openDB();
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(STORE_NAME, 'readonly');
+      const store = transaction.objectStore(STORE_NAME);
+      const request = store.getAll();
+      
+      request.onerror = () => resolve([]);
+      request.onsuccess = () => {
+        const tiles = request.result as CachedTile[];
+        resolve(tiles.map(t => t.bounds));
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get the union of all cached DEM tile bounds.
+ * Returns null if no tiles are cached.
+ */
+export async function getCachedBoundsUnion(): Promise<Bounds | null> {
+  const allBounds = await getAllCachedBounds();
+  if (allBounds.length === 0) return null;
+  
+  return allBounds.reduce((union, bounds) => unionBounds(union, bounds));
 }
 
 /**
@@ -649,17 +903,38 @@ export interface AzimuthData {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
+  /** Combined runout zones GeoTIFF for current aspect selection */
   runout_zones?: Uint8Array;
+  /** 
+   * Raw elevation data as Float32Array for lazy runout computation.
+   */
+  elevations_raw?: Float32Array;
+  /** 
+   * Raw azimuth data as Float32Array for lazy runout computation.
+   */
+  azimuths_raw?: Float32Array;
+  /** 
+   * Raw gradient data as Float32Array for lazy runout computation.
+   */
+  gradients_raw?: Float32Array;
+  /** Raster width (needed for lazy runout computation) */
+  width?: number;
+  /** Raster height (needed for lazy runout computation) */
+  height?: number;
+  /** Bounds for GeoTIFF generation when computing runout */
+  bounds?: Bounds;
 }
 
 /**
- * Get cached azimuths for bounds and excluded aspects
+ * Get cached azimuths for bounds.
+ * Note: excludedAspects parameter is kept for backward compatibility but ignored.
+ * Runout zones are pre-computed for all aspects.
  */
-export async function getCachedAzimuths(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function getCachedAzimuths(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    const key = azimuthCacheKey(normalizedBounds, excludedAspects ?? []);
+    const key = azimuthCacheKey(normalizedBounds);
     
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
@@ -670,12 +945,26 @@ export async function getCachedAzimuths(bounds: Bounds, excludedAspects?: string
       request.onsuccess = () => {
         const result = request.result as CachedAzimuths | undefined;
         if (result) {
-          console.log('[Azimuth Cache] Cache HIT for:', key);
+          const elevationsRaw = result.elevations_raw ? new Float32Array(result.elevations_raw) : undefined;
+          const azimuthsRaw = result.azimuths_raw ? new Float32Array(result.azimuths_raw) : undefined;
+          const gradientsRaw = result.gradients_raw ? new Float32Array(result.gradients_raw) : undefined;
+          console.log('[Azimuth Cache] Cache HIT for:', key, {
+            hasRunoutZones: !!result.runout_zones,
+            hasRawData: !!elevationsRaw && !!azimuthsRaw && !!gradientsRaw,
+            width: result.width,
+            height: result.height,
+          });
           resolve({
             elevations: new Uint8Array(result.elevations),
             azimuths: new Uint8Array(result.azimuths),
             gradients: new Uint8Array(result.gradients),
             runout_zones: result.runout_zones ? new Uint8Array(result.runout_zones) : undefined,
+            elevations_raw: elevationsRaw,
+            azimuths_raw: azimuthsRaw,
+            gradients_raw: gradientsRaw,
+            width: result.width,
+            height: result.height,
+            bounds: result.bounds,
           });
         } else {
           resolve(null);
@@ -688,25 +977,20 @@ export async function getCachedAzimuths(bounds: Bounds, excludedAspects?: string
 }
 
 /**
- * Check if two aspect arrays are equivalent (same aspects, any order)
+ * @deprecated No longer used - aspects are pre-computed
  */
-function aspectsMatch(a?: string[], b?: string[]): boolean {
-  const arrA = a ?? [];
-  const arrB = b ?? [];
-  if (arrA.length !== arrB.length) return false;
-  const sortedA = [...arrA].sort();
-  const sortedB = [...arrB].sort();
-  return sortedA.every((val, i) => val === sortedB[i]);
+function aspectsMatch(_a?: string[], _b?: string[]): boolean {
+  return true; // Always match since aspects are pre-computed
 }
 
 /**
- * Find cached azimuths that contain the requested bounds and match excluded aspects
+ * Find cached azimuths that contain the requested bounds.
+ * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  */
-export async function findContainingCachedAzimuths(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function findContainingCachedAzimuths(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    const aspects = excludedAspects ?? [];
     
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
@@ -718,15 +1002,19 @@ export async function findContainingCachedAzimuths(bounds: Bounds, excludedAspec
         const cursor = request.result;
         if (cursor) {
           const cached = cursor.value as CachedAzimuths;
-          // Must match both bounds containment AND excluded aspects
-          // Handle legacy cache entries that don't have excludedAspects
-          if (boundsContain(cached.bounds, normalizedBounds) && aspectsMatch(cached.excludedAspects, aspects)) {
-            console.log('[Azimuth Cache] Found containing cached azimuths with matching aspects');
+          if (boundsContain(cached.bounds, normalizedBounds)) {
+            console.log('[Azimuth Cache] Found containing cached azimuths');
             resolve({
               elevations: new Uint8Array(cached.elevations),
               azimuths: new Uint8Array(cached.azimuths),
               gradients: new Uint8Array(cached.gradients),
               runout_zones: cached.runout_zones ? new Uint8Array(cached.runout_zones) : undefined,
+              elevations_raw: cached.elevations_raw ? new Float32Array(cached.elevations_raw) : undefined,
+              azimuths_raw: cached.azimuths_raw ? new Float32Array(cached.azimuths_raw) : undefined,
+              gradients_raw: cached.gradients_raw ? new Float32Array(cached.gradients_raw) : undefined,
+              width: cached.width,
+              height: cached.height,
+              bounds: cached.bounds,
             });
             return;
           }
@@ -776,23 +1064,36 @@ export async function findCachedAzimuthBoundsContaining(bounds: Bounds): Promise
 }
 
 /**
- * Cache computed azimuths with excluded aspects
+ * Cache computed azimuths.
+ * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  */
-export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, excludedAspects?: string[]): Promise<void> {
+export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excludedAspects?: string[]): Promise<void> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    const aspects = excludedAspects ?? [];
-    const key = azimuthCacheKey(normalizedBounds, aspects);
+    const key = azimuthCacheKey(normalizedBounds);
+    
+    // Copy arrays to avoid issues with detached buffers from worker postMessage
+    const elevationsCopy = new Uint8Array(data.elevations);
+    const azimuthsCopy = new Uint8Array(data.azimuths);
+    const gradientsCopy = new Uint8Array(data.gradients);
+    const runoutZonesCopy = data.runout_zones ? new Uint8Array(data.runout_zones) : undefined;
+    const elevationsRawCopy = data.elevations_raw ? new Float32Array(data.elevations_raw) : undefined;
+    const azimuthsRawCopy = data.azimuths_raw ? new Float32Array(data.azimuths_raw) : undefined;
+    const gradientsRawCopy = data.gradients_raw ? new Float32Array(data.gradients_raw) : undefined;
     
     const cached: CachedAzimuths = {
       key,
       bounds: normalizedBounds,
-      elevations: data.elevations.buffer as ArrayBuffer,
-      azimuths: data.azimuths.buffer as ArrayBuffer,
-      gradients: data.gradients.buffer as ArrayBuffer,
-      runout_zones: data.runout_zones?.buffer as ArrayBuffer | undefined,
-      excludedAspects: [...aspects],
+      elevations: elevationsCopy.buffer,
+      azimuths: azimuthsCopy.buffer,
+      gradients: gradientsCopy.buffer,
+      runout_zones: runoutZonesCopy?.buffer,
+      elevations_raw: elevationsRawCopy?.buffer,
+      azimuths_raw: azimuthsRawCopy?.buffer,
+      gradients_raw: gradientsRawCopy?.buffer,
+      width: data.width,
+      height: data.height,
       timestamp: Date.now(),
     };
     
@@ -803,29 +1104,73 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, excludedA
       
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
-        console.log('[Azimuth Cache] Cached azimuths for:', key);
+        console.log('[Azimuth Cache] Cached azimuths for:', key, {
+          hasRunoutZones: !!runoutZonesCopy,
+          hasRawData: !!elevationsRawCopy && !!azimuthsRawCopy && !!gradientsRawCopy,
+          width: data.width,
+          height: data.height,
+        });
         resolve();
       };
     });
-  } catch {
-    // Caching failed, but that's okay
+  } catch (error) {
+    console.error('[Azimuth Cache] Failed to cache azimuths:', error);
   }
 }
 
 /**
- * Get azimuths with cache check (exact match or containing)
- * Includes excludedAspects in the lookup since runout zones depend on them
+ * Get the first cached azimuth entry (for startup when we don't know bounds yet)
  */
-export async function getAzimuthsWithContainsCheck(bounds: Bounds, excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function getFirstCachedAzimuths(): Promise<AzimuthData | null> {
+  try {
+    const db = await openDB();
+    
+    return new Promise((resolve) => {
+      const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
+      const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
+      const request = store.openCursor();
+      
+      request.onerror = () => resolve(null);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          const cached = cursor.value as CachedAzimuths;
+          console.log('[Azimuth Cache] Found cached azimuths on startup, bounds:', cached.bounds);
+          resolve({
+            elevations: new Uint8Array(cached.elevations),
+            azimuths: new Uint8Array(cached.azimuths),
+            gradients: new Uint8Array(cached.gradients),
+            runout_zones: cached.runout_zones ? new Uint8Array(cached.runout_zones) : undefined,
+            elevations_raw: cached.elevations_raw ? new Float32Array(cached.elevations_raw) : undefined,
+            azimuths_raw: cached.azimuths_raw ? new Float32Array(cached.azimuths_raw) : undefined,
+            gradients_raw: cached.gradients_raw ? new Float32Array(cached.gradients_raw) : undefined,
+            width: cached.width,
+            height: cached.height,
+            bounds: cached.bounds,
+          });
+        } else {
+          resolve(null);
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get azimuths with cache check (exact match or containing).
+ * Note: excludedAspects parameter is kept for backward compatibility but ignored.
+ */
+export async function getAzimuthsWithContainsCheck(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
   const normalizedBounds = normalizeBounds(bounds);
-  const aspects = excludedAspects ?? [];
   
   // First check exact match
-  const exact = await getCachedAzimuths(normalizedBounds, aspects);
+  const exact = await getCachedAzimuths(normalizedBounds);
   if (exact) return exact;
   
   // Check for containing cached azimuths
-  const containing = await findContainingCachedAzimuths(normalizedBounds, aspects);
+  const containing = await findContainingCachedAzimuths(normalizedBounds);
   if (containing) return containing;
   
   return null;

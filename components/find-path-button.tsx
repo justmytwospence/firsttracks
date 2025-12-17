@@ -1,10 +1,37 @@
 import { Button } from "@/components/ui/button";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
-import { type AzimuthData, type Bounds, type ElevationGrid, cacheAzimuths, getAzimuthsWithContainsCheck, getDEMWithContainsCheck } from "@/lib/dem-cache";
+import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+
+/**
+ * Compute bounds that contain all waypoints.
+ */
+function waypointsToBounds(waypoints: Point[]): Bounds | null {
+  if (waypoints.length === 0) return null;
+  
+  const lons = waypoints.map(w => w.coordinates[0]);
+  const lats = waypoints.map(w => w.coordinates[1]);
+  
+  return {
+    north: Math.max(...lats),
+    south: Math.min(...lats),
+    east: Math.max(...lons),
+    west: Math.min(...lons),
+  };
+}
+
+/**
+ * Check if all waypoints are within the given bounds.
+ */
+function waypointsWithinBounds(waypoints: Point[], bounds: Bounds): boolean {
+  return waypoints.every(w => {
+    const [lon, lat] = w.coordinates;
+    return lat <= bounds.north && lat >= bounds.south && lon <= bounds.east && lon >= bounds.west;
+  });
+}
 
 /**
  * Smooth a path using Gaussian-weighted moving average.
@@ -113,6 +140,7 @@ interface FindPathButtonProps {
   onExplorationUpdate?: (nodes: ExplorationNode[]) => void;
   onExplorationComplete?: () => void;
   onStartPathfinding?: () => void;
+  onDataBoundsChange?: (bounds: Bounds) => void;
   explorationBatchSize?: number;
   explorationDelayMs?: number;
   className?: string;
@@ -149,6 +177,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       onExplorationUpdate,
       onExplorationComplete,
       onStartPathfinding,
+      onDataBoundsChange,
       explorationBatchSize = 125,
       explorationDelayMs = 10,
       className,
@@ -268,91 +297,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       };
     }, []);
     
-    // Preload azimuths when preloadBounds changes (typically on first waypoint or GPX import)
-    useEffect(() => {
-      if (!preloadBounds || !workerRef.current) return;
-      
-      // Create a key for the bounds to detect changes
-      const boundsKey = `${preloadBounds.north},${preloadBounds.south},${preloadBounds.east},${preloadBounds.west}`;
-      
-      // Skip if already preloading or already preloaded these bounds
-      if (preloadingRef.current) return;
-      if (lastPreloadedBoundsRef.current === boundsKey && cachedAzimuthsRef.current) return;
-      
-      const preloadAzimuths = async () => {
-        preloadingRef.current = true;
-        lastPreloadedBoundsRef.current = boundsKey;
-        const worker = workerRef.current;
-        if (!worker) return;
-        
-        try {
-          // Check IndexedDB cache first
-          let azimuthResult = await getAzimuthsWithContainsCheck(preloadBounds, excludedAspects);
-          
-          if (!azimuthResult) {
-            // Fetch DEM data from AWS Terrain Tiles
-            console.log('[Preload] Fetching DEM from AWS Terrain Tiles...');
-            const demGrid: ElevationGrid = await getDEMWithContainsCheck(preloadBounds);
-            
-            // Compute azimuths from array (new approach)
-            console.log('[Preload] Computing azimuths from array...');
-            azimuthResult = await new Promise<AzimuthData>((resolve, reject) => {
-              const id = `preload_azimuths_${Date.now()}`;
-              
-              const handler = (event: MessageEvent<WorkerResponse>) => {
-                if (event.data.id !== id) return;
-                
-                worker.removeEventListener("message", handler);
-                
-                if (event.data.type === "error") {
-                  reject(new Error(event.data.message as string));
-                } else if (event.data.type === "azimuths_result") {
-                  resolve({
-                    elevations: event.data.elevations as Uint8Array,
-                    azimuths: event.data.azimuths as Uint8Array,
-                    gradients: event.data.gradients as Uint8Array,
-                    runout_zones: event.data.runout_zones as Uint8Array,
-                  });
-                }
-              };
-              
-              worker.addEventListener("message", handler);
-              worker.postMessage({
-                type: "compute_azimuths_from_array",
-                id,
-                elevations: demGrid.data,
-                width: demGrid.width,
-                height: demGrid.height,
-                bounds: demGrid.bounds,
-                excludedAspects,
-              } as WorkerRequest);
-            });
-            
-            // Cache to IndexedDB
-            await cacheAzimuths(preloadBounds, azimuthResult, excludedAspects);
-          }
-          
-          // Cache in memory
-          cachedAzimuthsRef.current = {
-            elevations: new Uint8Array(azimuthResult.elevations),
-            azimuths: new Uint8Array(azimuthResult.azimuths),
-            gradients: new Uint8Array(azimuthResult.gradients),
-            runout_zones: azimuthResult.runout_zones ? new Uint8Array(azimuthResult.runout_zones) : undefined,
-          };
-          
-          // Update aspect raster display
-          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
-          
-          console.log('[Preload] Azimuths ready');
-        } catch (error) {
-          console.warn('[Preload] Failed to preload azimuths:', error);
-        } finally {
-          preloadingRef.current = false;
-        }
-      };
-      
-      preloadAzimuths();
-    }, [preloadBounds, setAspectRaster, excludedAspects]);
+    // Note: Azimuth preloading is now handled by page.tsx with toasts
+    // This component only computes azimuths on-demand during pathfinding if not already cached
     
     const handleClick = useCallback(async () => {
       console.log('=== FindPathButton handleClick START ===');
@@ -364,6 +310,24 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       if (!bounds || !workerRef.current) {
         console.log('Early return: bounds or worker not ready');
         return;
+      }
+      
+      // Check if waypoints are within current bounds - if not, we need to expand
+      let effectiveBounds = bounds;
+      const waypointBounds = waypointsToBounds(waypoints);
+      const waypointsOutsideBounds = waypointBounds && !boundsContain(bounds, waypointBounds);
+      
+      if (waypointsOutsideBounds) {
+        console.log('[FindPath] Waypoints outside current bounds, will fetch expanded data');
+        console.log('  Current bounds:', bounds);
+        console.log('  Waypoint bounds:', waypointBounds);
+        // Compute new bounds that include both current bounds and waypoints (with padding)
+        const combinedBounds = unionBounds(bounds, waypointBounds);
+        // Expand by 1.5x to give some buffer around waypoints
+        effectiveBounds = expandBounds(combinedBounds, 1.5);
+        console.log('  Expanded bounds:', effectiveBounds);
+        // Invalidate cached azimuths since we're fetching new data
+        cachedAzimuthsRef.current = null;
       }
       
       // Clear existing path when starting new pathfinding
@@ -388,21 +352,24 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         
         // Only fetch/compute azimuths if not already cached in memory
         if (!azimuthResult) {
-          // Check IndexedDB cache first
-          azimuthResult = await getAzimuthsWithContainsCheck(bounds, excludedAspects);
+          // Check IndexedDB cache first (use effective bounds which may be expanded)
+          azimuthResult = await getAzimuthsWithContainsCheck(effectiveBounds, excludedAspects);
           
           if (!azimuthResult) {
             // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
-            toast.message("Downloading elevation data...", { 
+            toast.message(waypointsOutsideBounds ? "Expanding terrain coverage..." : "Downloading elevation data...", { 
               id: loadingToastId, 
               duration: Number.POSITIVE_INFINITY 
             });
             
-            const demGrid: ElevationGrid = await getDEMWithContainsCheck(bounds, {
+            const demGrid: ElevationGrid = await getDEMWithContainsCheck(effectiveBounds, {
               onProgress: (message) => {
                 toast.message(message, { id: loadingToastId, duration: Number.POSITIVE_INFINITY });
               }
             });
+            
+            // Report actual data bounds to parent
+            onDataBoundsChange?.(demGrid.bounds);
             
             // Compute azimuths from array
             toast.message("Computing azimuths and gradients...", { 
@@ -445,7 +412,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             azimuthResult = await azimuthsPromise;
             
             // Cache the computed azimuths to IndexedDB for next session
-            await cacheAzimuths(bounds, azimuthResult, excludedAspects);
+            // Use demGrid.bounds which represents the actual data coverage
+            await cacheAzimuths(demGrid.bounds, azimuthResult, excludedAspects);
           }
           
           // Cache in memory for subsequent pathfinding in this session
@@ -601,6 +569,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       setPathAspects,
       setAspectRaster,
       onStartPathfinding,
+      onDataBoundsChange,
       processExplorationQueue,
       explorationBatchSize,
       explorationDelayMs,

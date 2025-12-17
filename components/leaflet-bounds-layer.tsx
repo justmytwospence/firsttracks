@@ -20,9 +20,7 @@ export default function LeafletBoundsLayer({ bounds }: LeafletBoundsLayerProps) 
         color: "#3b82f6",
         weight: 2,
         opacity: 0.6,
-        fill: true,
-        fillColor: "#3b82f6",
-        fillOpacity: 0.05,
+        fill: false,
         dashArray: "6, 6",
       }}
     />

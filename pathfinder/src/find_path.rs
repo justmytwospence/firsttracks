@@ -178,19 +178,79 @@ impl ExplorationTracker {
   }
 
   fn flush(&mut self) {
+    const MAX_FRONTIER_NODES: usize = 5000;
+    
     if let Some(ref callback) = self.callback {
       if !self.frontier.is_empty() {
         // Convert frontier to JS array of [lon, lat] pairs
         let arr = js_sys::Array::new();
-        for (x, y) in &self.frontier {
-          // Convert pixel to coordinate
-          let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
-          let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
+        
+        if self.frontier.len() <= MAX_FRONTIER_NODES {
+          // Small enough - send all nodes
+          for (x, y) in &self.frontier {
+            let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
+            let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
+            
+            let point = js_sys::Array::new();
+            point.push(&JsValue::from_f64(lon));
+            point.push(&JsValue::from_f64(lat));
+            arr.push(&point);
+          }
+        } else {
+          // Spatially sample to preserve frontier shape
+          // Use grid-based sampling: divide space into cells, pick one node per cell
           
-          let point = js_sys::Array::new();
-          point.push(&JsValue::from_f64(lon));
-          point.push(&JsValue::from_f64(lat));
-          arr.push(&point);
+          // Find bounding box of frontier
+          let mut min_x = usize::MAX;
+          let mut max_x = 0usize;
+          let mut min_y = usize::MAX;
+          let mut max_y = 0usize;
+          
+          for &(x, y) in &self.frontier {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+          }
+          
+          // Calculate grid size to get approximately MAX_FRONTIER_NODES cells
+          // Use sqrt since we're dividing a 2D space
+          let frontier_width = (max_x - min_x + 1) as f64;
+          let frontier_height = (max_y - min_y + 1) as f64;
+          let aspect_ratio = frontier_width / frontier_height.max(1.0);
+          
+          // Target more samples than MAX_FRONTIER_NODES to ensure good coverage
+          let target_samples = MAX_FRONTIER_NODES as f64 * 1.5;
+          
+          // Solve: grid_cols * grid_rows ≈ target_samples
+          // with grid_cols/grid_rows ≈ aspect_ratio
+          let grid_rows = (target_samples / aspect_ratio).sqrt().max(1.0) as usize;
+          let grid_cols = (target_samples * aspect_ratio).sqrt().max(1.0) as usize;
+          
+          let cell_width = ((max_x - min_x + 1) as f64 / grid_cols as f64).max(1.0);
+          let cell_height = ((max_y - min_y + 1) as f64 / grid_rows as f64).max(1.0);
+          
+          // Use a HashMap to store one representative node per grid cell
+          use std::collections::HashMap;
+          let mut grid_samples: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+          
+          for &(x, y) in &self.frontier {
+            let grid_x = ((x - min_x) as f64 / cell_width) as usize;
+            let grid_y = ((y - min_y) as f64 / cell_height) as usize;
+            // Keep first node found in each cell (could also keep centroid, but this is simpler)
+            grid_samples.entry((grid_x, grid_y)).or_insert((x, y));
+          }
+          
+          // Convert sampled nodes to coordinates
+          for (x, y) in grid_samples.values() {
+            let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
+            let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
+            
+            let point = js_sys::Array::new();
+            point.push(&JsValue::from_f64(lon));
+            point.push(&JsValue::from_f64(lat));
+            arr.push(&point);
+          }
         }
         
         let _ = callback.call1(&JsValue::NULL, &arr);
@@ -249,17 +309,56 @@ pub fn find_path_rs(
   let start_coord: Coordinate = parse_point_to_coordinate(&start)?;
   let end_coord: Coordinate = parse_point_to_coordinate(&end)?;
 
-  let (start_x, start_y) = elevations_geotiff.coord_to_pixel(start_coord)
-    .ok_or_else(|| JsValue::from_str("Failed to convert start coord to pixel"))?;
-  let start_node: (usize, usize) = (start_x as usize, start_y as usize);
-  let (end_x, end_y) = elevations_geotiff.coord_to_pixel(end_coord)
-    .ok_or_else(|| JsValue::from_str("Failed to convert end coord to pixel"))?;
-  let end_node: (usize, usize) = (end_x as usize, end_y as usize);
-
   let (width, height) = elevations_geotiff.image_info().dimensions
     .ok_or_else(|| JsValue::from_str("Failed to get image dimensions"))?;
   let width: usize = width as usize;
   let height: usize = height as usize;
+
+  // Debug: log georeferencing info
+  let origin = elevations_geotiff.origin();
+  let pixel_size = elevations_geotiff.pixel_size();
+  if let Some(o) = origin {
+    console_log(&format!("[find_path] GeoTIFF origin: {:?}", o));
+  }
+  if let Some(ps) = pixel_size {
+    console_log(&format!("[find_path] GeoTIFF pixel_size: {:?}", ps));
+    // Calculate expected bounds from georeferencing
+    if let Some(o) = origin {
+      let west = o[0];
+      let north = o[1];
+      let east = west + (width as f64) * ps[0];
+      let south = north + (height as f64) * ps[1]; // ps[1] is negative
+      console_log(&format!("[find_path] Calculated bounds: west={}, north={}, east={}, south={}", west, north, east, south));
+    }
+  }
+  console_log(&format!("[find_path] Start coord: lat={}, lon={}", start_coord.y, start_coord.x));
+  console_log(&format!("[find_path] End coord: lat={}, lon={}", end_coord.y, end_coord.x));
+  console_log(&format!("[find_path] Raster dimensions: {}x{}", width, height));
+
+  let (start_x, start_y) = elevations_geotiff.coord_to_pixel(start_coord)
+    .ok_or_else(|| JsValue::from_str("Failed to convert start coord to pixel"))?;
+  console_log(&format!("[find_path] Start pixel: ({}, {})", start_x, start_y));
+  let start_node: (usize, usize) = (start_x as usize, start_y as usize);
+  
+  // Validate start node is within bounds
+  if start_node.0 >= width || start_node.1 >= height {
+    return Err(JsValue::from_str(&format!(
+      "Start point ({}, {}) is outside raster bounds ({}x{})",
+      start_node.0, start_node.1, width, height
+    )));
+  }
+  
+  let (end_x, end_y) = elevations_geotiff.coord_to_pixel(end_coord)
+    .ok_or_else(|| JsValue::from_str("Failed to convert end coord to pixel"))?;
+  let end_node: (usize, usize) = (end_x as usize, end_y as usize);
+  
+  // Validate end node is within bounds
+  if end_node.0 >= width || end_node.1 >= height {
+    return Err(JsValue::from_str(&format!(
+      "End point ({}, {}) is outside raster bounds ({}x{})",
+      end_node.0, end_node.1, width, height
+    )));
+  }
 
   // Create exploration tracker with callback using Rc<RefCell> for interior mutability
   // Large batch_size (10000) for fast animation - JS throttles to 30fps anyway

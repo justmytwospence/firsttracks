@@ -5,7 +5,7 @@
  * Sends exploration updates back to main thread for visualization.
  */
 
-import wasmInit, { find_path_rs, compute_azimuths, compute_azimuths_from_array, array_to_geotiff, init as initPanicHook } from '../pathfinder/pkg/pathfinder';
+import wasmInit, { find_path_rs, compute_azimuths, compute_azimuths_from_array, compute_runout_for_aspects, array_to_geotiff, init as initPanicHook } from '../pathfinder/pkg/pathfinder';
 
 // Types for messages
 export interface PathfinderRequest {
@@ -50,6 +50,36 @@ export interface ComputeAzimuthsFromArrayRequest {
   excludedAspects: string[];
 }
 
+/**
+ * Message type for computing runout zones lazily when aspect selection changes.
+ * Uses raw elevation/azimuth/gradient data instead of pre-computed channels.
+ */
+export interface ComputeRunoutRequest {
+  type: 'compute_runout';
+  id: string;
+  elevations: Float32Array;
+  azimuths: Float32Array;
+  gradients: Float32Array;
+  width: number;
+  height: number;
+  bounds: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
+  excludedAspects: string[];
+}
+
+/**
+ * Result of computing runout zones
+ */
+export interface ComputeRunoutResult {
+  type: 'compute_runout_result';
+  id: string;
+  runout_zones: Uint8Array;
+}
+
 export interface ExplorationUpdate {
   type: 'exploration';
   id: string;
@@ -69,7 +99,33 @@ export interface AzimuthsResult {
   elevations: Uint8Array;
   azimuths: Uint8Array;
   gradients: Uint8Array;
-  runout_zones: Uint8Array;
+  /** 
+   * Runout zones GeoTIFF - initially empty, computed lazily on aspect change.
+   */
+  runout_zones?: Uint8Array;
+  /**
+   * Raw elevation data as Float32Array for lazy runout computation.
+   */
+  elevations_raw?: Float32Array;
+  /**
+   * Raw azimuth data as Float32Array for lazy runout computation.
+   */
+  azimuths_raw?: Float32Array;
+  /**
+   * Raw gradient data as Float32Array for lazy runout computation.
+   */
+  gradients_raw?: Float32Array;
+  /** Width of the raster grid */
+  width?: number;
+  /** Height of the raster grid */
+  height?: number;
+  /** Bounds for GeoTIFF generation */
+  bounds?: {
+    north: number;
+    south: number;
+    east: number;
+    west: number;
+  };
 }
 
 export interface ErrorResult {
@@ -78,8 +134,8 @@ export interface ErrorResult {
   message: string;
 }
 
-export type WorkerRequest = PathfinderRequest | ComputeAzimuthsRequest | ComputeAzimuthsFromArrayRequest;
-export type WorkerResponse = ExplorationUpdate | PathResult | AzimuthsResult | ErrorResult;
+export type WorkerRequest = PathfinderRequest | ComputeAzimuthsRequest | ComputeAzimuthsFromArrayRequest | ComputeRunoutRequest;
+export type WorkerResponse = ExplorationUpdate | PathResult | AzimuthsResult | ComputeRunoutResult | ErrorResult;
 
 let wasmInitialized = false;
 
@@ -293,9 +349,10 @@ async function handleComputeAzimuths(request: ComputeAzimuthsRequest): Promise<v
 /**
  * Handle azimuth computation request from raw elevation array (AWS Terrain Tiles).
  * This is more efficient than GeoTIFF parsing for tile-based elevation data.
+ * Runout zones are NOT computed here - they are computed lazily on aspect change.
  */
 async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayRequest): Promise<void> {
-  const { id, elevations, width, height, bounds, excludedAspects } = request;
+  const { id, elevations, width, height, bounds } = request;
   
   try {
     console.log('[Worker] Starting array-based azimuth computation:', { width, height, bounds });
@@ -308,22 +365,29 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
     await ensureWasmInit();
     console.log('[Worker] WASM initialized for array-based azimuths');
     
-    // Compute azimuths from raw array
-    const arrayResult = compute_azimuths_from_array(elevations, width, height, excludedAspects ?? []);
-    console.log('[Worker] Array azimuths computed:', {
-      elevationsLength: arrayResult.elevations.length,
-      azimuthsLength: arrayResult.azimuths.length,
-      gradientsLength: arrayResult.gradients.length,
-      runoutZonesLength: arrayResult.runout_zones?.length,
-      width: arrayResult.width,
-      height: arrayResult.height
-    });
+    // Compute azimuths from raw array (runout is skipped - computed lazily)
+    const arrayResult = compute_azimuths_from_array(elevations, width, height, []);
     
+    // Get results using methods that return Float32Array
+    const resultElevations = arrayResult.get_elevations();
+    const resultAzimuths = arrayResult.get_azimuths();
+    const resultGradients = arrayResult.get_gradients();
+    const resultWidth = arrayResult.width;
+    const resultHeight = arrayResult.height;
+    
+    console.log('[Worker] Array azimuths computed (runout lazy):', {
+      elevationsLength: resultElevations.length,
+      azimuthsLength: resultAzimuths.length,
+      gradientsLength: resultGradients.length,
+      width: resultWidth,
+      height: resultHeight
+    });
+
     // Convert results to GeoTIFF format for compatibility with existing visualization code
     const elevationsGeotiff = array_to_geotiff(
-      arrayResult.elevations,
-      arrayResult.width,
-      arrayResult.height,
+      resultElevations,
+      resultWidth,
+      resultHeight,
       bounds.west,
       bounds.north,
       bounds.east,
@@ -331,9 +395,9 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
     );
     
     const azimuthsGeotiff = array_to_geotiff(
-      arrayResult.azimuths,
-      arrayResult.width,
-      arrayResult.height,
+      resultAzimuths,
+      resultWidth,
+      resultHeight,
       bounds.west,
       bounds.north,
       bounds.east,
@@ -341,19 +405,9 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
     );
     
     const gradientsGeotiff = array_to_geotiff(
-      arrayResult.gradients,
-      arrayResult.width,
-      arrayResult.height,
-      bounds.west,
-      bounds.north,
-      bounds.east,
-      bounds.south
-    );
-    
-    const runoutZonesGeotiff = array_to_geotiff(
-      arrayResult.runout_zones,
-      arrayResult.width,
-      arrayResult.height,
+      resultGradients,
+      resultWidth,
+      resultHeight,
       bounds.west,
       bounds.north,
       bounds.east,
@@ -366,7 +420,14 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
       elevations: new Uint8Array(elevationsGeotiff),
       azimuths: new Uint8Array(azimuthsGeotiff),
       gradients: new Uint8Array(gradientsGeotiff),
-      runout_zones: new Uint8Array(runoutZonesGeotiff)
+      // No runout_zones - computed lazily on aspect change
+      // Include raw data for lazy runout computation
+      elevations_raw: resultElevations,
+      azimuths_raw: resultAzimuths,
+      gradients_raw: resultGradients,
+      width: resultWidth,
+      height: resultHeight,
+      bounds
     } satisfies AzimuthsResult);
     
   } catch (error) {
@@ -375,6 +436,57 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
       type: 'error',
       id,
       message: error instanceof Error ? error.message : 'Unknown error computing azimuths from array'
+    } satisfies ErrorResult);
+  }
+}
+
+/**
+ * Handle request to compute runout zones lazily when aspect selection changes.
+ * Calls the WASM function that computes runout only for selected aspects.
+ */
+async function handleComputeRunout(request: ComputeRunoutRequest): Promise<void> {
+  const { id, elevations, azimuths, gradients, width, height, bounds, excludedAspects } = request;
+  
+  try {
+    console.log('[Worker] Computing runout lazily for aspects:', excludedAspects);
+    
+    await ensureWasmInit();
+    
+    // Call the lazy runout computation function
+    const runoutArray = compute_runout_for_aspects(
+      elevations,
+      azimuths,
+      gradients,
+      width,
+      height,
+      excludedAspects
+    );
+    
+    console.log('[Worker] Lazy runout computed, length:', runoutArray.length);
+    
+    // Convert to GeoTIFF for rendering
+    const runoutZonesGeotiff = array_to_geotiff(
+      runoutArray,
+      width,
+      height,
+      bounds.west,
+      bounds.north,
+      bounds.east,
+      bounds.south
+    );
+    
+    self.postMessage({
+      type: 'compute_runout_result',
+      id,
+      runout_zones: new Uint8Array(runoutZonesGeotiff)
+    } satisfies ComputeRunoutResult);
+    
+  } catch (error) {
+    console.error('[Worker] Compute runout error:', error);
+    self.postMessage({
+      type: 'error',
+      id,
+      message: error instanceof Error ? error.message : 'Unknown error computing runout'
     } satisfies ErrorResult);
   }
 }
@@ -394,6 +506,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       break;
     case 'compute_azimuths_from_array':
       await handleComputeAzimuthsFromArray(request);
+      break;
+    case 'compute_runout':
+      await handleComputeRunout(request);
       break;
   }
 };

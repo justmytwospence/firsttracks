@@ -110,8 +110,13 @@ pub fn array_to_geotiff(
       .map_err(|e| JsValue::from_str(&format!("Failed to write geo_keys: {}", e)))?;
     
     // Calculate pixel scale from bounds
+    // Note: Y pixel scale is stored as positive in ModelPixelScale (tag 33550).
+    // The georaster crate's pixel_size() method negates it automatically:
+    //   Some(mps) => Some([mps[0], -mps[1]])
+    // This is correct because coord_to_pixel does: y = (coord.y - origin.y) / pixel_size_y
+    // With origin.y = north and pixel_size_y negative, southward coordinates give positive y.
     let pixel_scale_x = (east - west) / width as f64;
-    let pixel_scale_y = (north - south) / height as f64;
+    let pixel_scale_y = (north - south) / height as f64;  // Stored positive, georaster negates it
     let pixel_scale: Vec<f64> = vec![pixel_scale_x, pixel_scale_y, 0.0];
     image
       .encoder()
