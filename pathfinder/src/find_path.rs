@@ -5,7 +5,7 @@ use georaster::{geotiff::GeoTiffReader, Coordinate};
 use js_sys::Function;
 use pathfinding::directed::fringe::fringe;
 use wasm_bindgen::prelude::*;
-use crate::{azimuth::Aspect, console_log::console_log, raster::get_raster};
+use crate::{azimuth::Aspect, raster::get_raster};
 
 fn parse_point_to_coordinate(point_str: &str) -> Result<Coordinate, JsValue> {
   let geojson: GeoJson = GeoJson::from_json_value(point_str.parse().unwrap())
@@ -52,210 +52,91 @@ fn cost_fn(distance: f64, gradient: f64) -> i32 {
   (distance * gradient_multiplier) as i32
 }
 
-/// Exploration tracker using interior mutability for callback batching
-/// Tracks the true expanding frontier (boundary of explored region)
+/// Exploration tracker - streams newly-explored cells to JS for the animated flood-fill overlay.
+///
+/// Flushes fire on a wall-clock cadence (~33 ms) rather than on radial growth, so each batch is
+/// predictable in size and digestible on the main thread regardless of how fast or slow the
+/// search is moving through terrain. Each flush ships ONLY cells added since the previous flush
+/// (incremental), so total transfer and draw cost are O(n) over the search instead of O(n²).
 struct ExplorationTracker {
   callback: Option<Function>,
-  explored: HashSet<(usize, usize)>,  // All visited nodes
-  frontier: HashSet<(usize, usize)>,   // Current boundary nodes (explored with unexplored neighbors)
-  batch_counter: usize,
-  total_explored: usize,  // Running count for adaptive batch sizing
-  base_batch_size: usize,
-  pixel_scale: (f64, f64),  // (dx, dy) for pixel to coord conversion
-  origin: (f64, f64),       // (x, y) origin
-  width: usize,
-  height: usize,
+  explored_cells: Vec<(u16, u16)>,
+  explored_set: HashSet<(usize, usize)>,
+  pixel_scale: (f64, f64),
+  origin: (f64, f64),
+  last_flush_idx: usize,
+  last_flush_time_ms: f64,
+  nodes_since_time_check: u32,
 }
 
+const FLUSH_INTERVAL_MS: f64 = 33.0;
+const TIME_CHECK_NODE_STRIDE: u32 = 200;
+
 impl ExplorationTracker {
-  fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, batch_size: usize, width: usize, height: usize) -> Self {
-    // Get transform parameters from geotiff
+  fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, _batch_size: usize) -> Self {
     let origin = geotiff.origin().unwrap_or([0.0, 0.0]);
     let pixel_scale_arr = geotiff.pixel_size().unwrap_or([1.0/10800.0, -1.0/10800.0]);
-    
+
     Self {
       callback,
-      explored: HashSet::new(),
-      frontier: HashSet::new(),
-      batch_counter: 0,
-      total_explored: 0,
-      base_batch_size: batch_size,
+      explored_cells: Vec::with_capacity(50000),
+      explored_set: HashSet::with_capacity(50000),
       pixel_scale: (pixel_scale_arr[0], pixel_scale_arr[1]),
       origin: (origin[0], origin[1]),
-      width,
-      height,
+      last_flush_idx: 0,
+      last_flush_time_ms: js_sys::Date::now(),
+      nodes_since_time_check: 0,
     }
   }
 
-  /// Compute adaptive batch size based on total explored nodes
-  /// Starts slow for visual feedback, ramps up exponentially
-  fn current_batch_size(&self) -> usize {
-    // Use log2 scaling: batch doubles roughly every 10x explored nodes
-    // 0-500: base (500)
-    // 500-5k: 2x (1000)  
-    // 5k-50k: 4x (2000)
-    // 50k-500k: 8x (4000)
-    // 500k+: 16x (8000)
-    let multiplier = if self.total_explored < 500 {
-      1
-    } else {
-      // log10(total) gives us roughly: 500->2.7, 5k->3.7, 50k->4.7, 500k->5.7
-      // Subtract 2.5 and use as power of 2
-      let log_val = (self.total_explored as f64).log10() - 2.5;
-      let power = log_val.max(0.0).min(4.0); // Cap at 16x
-      (2.0_f64.powf(power)) as usize
-    };
-    
-    self.base_batch_size * multiplier
-  }
-
-  /// Called when a node is visited - updates explored set and frontier
   fn add_node(&mut self, x: usize, y: usize) {
     if self.callback.is_none() {
       return;
     }
 
-    // Add to explored set
-    self.explored.insert((x, y));
-    self.total_explored += 1;
-    
-    // Add to frontier (will be refined when we check its neighbors)
-    self.frontier.insert((x, y));
-    
-    // Check if this node should remain on frontier (has any unexplored neighbors)
-    // Also remove neighbors from frontier if they're now fully surrounded
-    self.update_frontier_around(x, y);
-    
-    self.batch_counter += 1;
-    if self.batch_counter >= self.current_batch_size() {
-      self.flush();
-      self.batch_counter = 0;
+    if !self.explored_set.insert((x, y)) {
+      return;
     }
-  }
 
-  /// Update frontier status for a node and its neighbors
-  fn update_frontier_around(&mut self, x: usize, y: usize) {
-    const DIRECTIONS: [(isize, isize); 8] = [
-      (0, 1), (1, 0), (0, -1), (-1, 0),
-      (1, 1), (1, -1), (-1, -1), (-1, 1),
-    ];
+    self.explored_cells.push((x as u16, y as u16));
 
-    // Check if current node should be on frontier
-    let mut has_unexplored_neighbor = false;
-    for &(dx, dy) in DIRECTIONS.iter() {
-      let nx = (x as isize + dx) as usize;
-      let ny = (y as isize + dy) as usize;
-      if nx < self.width && ny < self.height && !self.explored.contains(&(nx, ny)) {
-        has_unexplored_neighbor = true;
-        break;
-      }
-    }
-    
-    if !has_unexplored_neighbor {
-      self.frontier.remove(&(x, y));
-    }
-    
-    // Check neighbors that were on frontier - they might now be interior
-    for &(dx, dy) in DIRECTIONS.iter() {
-      let nx = (x as isize + dx) as usize;
-      let ny = (y as isize + dy) as usize;
-      if nx < self.width && ny < self.height && self.frontier.contains(&(nx, ny)) {
-        // Check if this neighbor still has unexplored neighbors
-        let mut still_frontier = false;
-        for &(ddx, ddy) in DIRECTIONS.iter() {
-          let nnx = (nx as isize + ddx) as usize;
-          let nny = (ny as isize + ddy) as usize;
-          if nnx < self.width && nny < self.height && !self.explored.contains(&(nnx, nny)) {
-            still_frontier = true;
-            break;
-          }
-        }
-        if !still_frontier {
-          self.frontier.remove(&(nx, ny));
-        }
+    // Amortize the Date::now() call across TIME_CHECK_NODE_STRIDE nodes so the
+    // pathfinding hot loop isn't dominated by the time check.
+    self.nodes_since_time_check += 1;
+    if self.nodes_since_time_check >= TIME_CHECK_NODE_STRIDE {
+      self.nodes_since_time_check = 0;
+      let now = js_sys::Date::now();
+      if now - self.last_flush_time_ms >= FLUSH_INTERVAL_MS {
+        self.flush();
+        self.last_flush_time_ms = now;
       }
     }
   }
 
+  /// Ship cells added since the previous flush. No-op if there are no new cells.
   fn flush(&mut self) {
-    const MAX_FRONTIER_NODES: usize = 5000;
-    
-    if let Some(ref callback) = self.callback {
-      if !self.frontier.is_empty() {
-        // Convert frontier to JS array of [lon, lat] pairs
-        let arr = js_sys::Array::new();
-        
-        if self.frontier.len() <= MAX_FRONTIER_NODES {
-          // Small enough - send all nodes
-          for (x, y) in &self.frontier {
-            let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
-            let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
-            
-            let point = js_sys::Array::new();
-            point.push(&JsValue::from_f64(lon));
-            point.push(&JsValue::from_f64(lat));
-            arr.push(&point);
-          }
-        } else {
-          // Spatially sample to preserve frontier shape
-          // Use grid-based sampling: divide space into cells, pick one node per cell
-          
-          // Find bounding box of frontier
-          let mut min_x = usize::MAX;
-          let mut max_x = 0usize;
-          let mut min_y = usize::MAX;
-          let mut max_y = 0usize;
-          
-          for &(x, y) in &self.frontier {
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-          }
-          
-          // Calculate grid size to get approximately MAX_FRONTIER_NODES cells
-          // Use sqrt since we're dividing a 2D space
-          let frontier_width = (max_x - min_x + 1) as f64;
-          let frontier_height = (max_y - min_y + 1) as f64;
-          let aspect_ratio = frontier_width / frontier_height.max(1.0);
-          
-          // Target more samples than MAX_FRONTIER_NODES to ensure good coverage
-          let target_samples = MAX_FRONTIER_NODES as f64 * 1.5;
-          
-          // Solve: grid_cols * grid_rows ≈ target_samples
-          // with grid_cols/grid_rows ≈ aspect_ratio
-          let grid_rows = (target_samples / aspect_ratio).sqrt().max(1.0) as usize;
-          let grid_cols = (target_samples * aspect_ratio).sqrt().max(1.0) as usize;
-          
-          let cell_width = ((max_x - min_x + 1) as f64 / grid_cols as f64).max(1.0);
-          let cell_height = ((max_y - min_y + 1) as f64 / grid_rows as f64).max(1.0);
-          
-          // Use a HashMap to store one representative node per grid cell
-          use std::collections::HashMap;
-          let mut grid_samples: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
-          
-          for &(x, y) in &self.frontier {
-            let grid_x = ((x - min_x) as f64 / cell_width) as usize;
-            let grid_y = ((y - min_y) as f64 / cell_height) as usize;
-            // Keep first node found in each cell (could also keep centroid, but this is simpler)
-            grid_samples.entry((grid_x, grid_y)).or_insert((x, y));
-          }
-          
-          // Convert sampled nodes to coordinates
-          for (x, y) in grid_samples.values() {
-            let lon = self.origin.0 + (*x as f64) * self.pixel_scale.0;
-            let lat = self.origin.1 + (*y as f64) * self.pixel_scale.1;
-            
-            let point = js_sys::Array::new();
-            point.push(&JsValue::from_f64(lon));
-            point.push(&JsValue::from_f64(lat));
-            arr.push(&point);
-          }
-        }
-        
-        let _ = callback.call1(&JsValue::NULL, &arr);
-      }
+    let Some(ref callback) = self.callback else { return };
+    let new_cells = &self.explored_cells[self.last_flush_idx..];
+    if new_cells.is_empty() {
+      return;
     }
+
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &"originX".into(), &JsValue::from_f64(self.origin.0)).unwrap();
+    js_sys::Reflect::set(&obj, &"originY".into(), &JsValue::from_f64(self.origin.1)).unwrap();
+    js_sys::Reflect::set(&obj, &"scaleX".into(), &JsValue::from_f64(self.pixel_scale.0)).unwrap();
+    js_sys::Reflect::set(&obj, &"scaleY".into(), &JsValue::from_f64(self.pixel_scale.1)).unwrap();
+
+    let cells = js_sys::Uint16Array::new_with_length((new_cells.len() * 2) as u32);
+    for (i, &(x, y)) in new_cells.iter().enumerate() {
+      cells.set_index((i * 2) as u32, x);
+      cells.set_index((i * 2 + 1) as u32, y);
+    }
+    js_sys::Reflect::set(&obj, &"cells".into(), &cells).unwrap();
+
+    let _ = callback.call1(&JsValue::NULL, &obj);
+
+    self.last_flush_idx = self.explored_cells.len();
   }
 }
 
@@ -314,30 +195,8 @@ pub fn find_path_rs(
   let width: usize = width as usize;
   let height: usize = height as usize;
 
-  // Debug: log georeferencing info
-  let origin = elevations_geotiff.origin();
-  let pixel_size = elevations_geotiff.pixel_size();
-  if let Some(o) = origin {
-    console_log(&format!("[find_path] GeoTIFF origin: {:?}", o));
-  }
-  if let Some(ps) = pixel_size {
-    console_log(&format!("[find_path] GeoTIFF pixel_size: {:?}", ps));
-    // Calculate expected bounds from georeferencing
-    if let Some(o) = origin {
-      let west = o[0];
-      let north = o[1];
-      let east = west + (width as f64) * ps[0];
-      let south = north + (height as f64) * ps[1]; // ps[1] is negative
-      console_log(&format!("[find_path] Calculated bounds: west={}, north={}, east={}, south={}", west, north, east, south));
-    }
-  }
-  console_log(&format!("[find_path] Start coord: lat={}, lon={}", start_coord.y, start_coord.x));
-  console_log(&format!("[find_path] End coord: lat={}, lon={}", end_coord.y, end_coord.x));
-  console_log(&format!("[find_path] Raster dimensions: {}x{}", width, height));
-
   let (start_x, start_y) = elevations_geotiff.coord_to_pixel(start_coord)
     .ok_or_else(|| JsValue::from_str("Failed to convert start coord to pixel"))?;
-  console_log(&format!("[find_path] Start pixel: ({}, {})", start_x, start_y));
   let start_node: (usize, usize) = (start_x as usize, start_y as usize);
   
   // Validate start node is within bounds
@@ -360,24 +219,14 @@ pub fn find_path_rs(
     )));
   }
 
-  // Create exploration tracker with callback using Rc<RefCell> for interior mutability
-  // Large batch_size (10000) for fast animation - JS throttles to 30fps anyway
-  let batch_size = exploration_batch_size.unwrap_or(10000);
-  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback, &elevations_geotiff, batch_size, width, height)));
+  // Create exploration tracker
+  let batch_size = exploration_batch_size.unwrap_or(500);
+  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback, &elevations_geotiff, batch_size)));
   let tracker_clone = tracker.clone();
 
   let heuristic = |&(x, y): &(usize, usize)| -> i32 {
     distance((x, y), end_node) as i32
   };
-
-  let d: f64 = distance((start_node.0, start_node.1), (end_node.0, end_node.1));
-  let dz: f64 = elevations[end_node.1][end_node.0] - elevations[start_node.1][start_node.0];
-  let gradient: f64 = dz / d;
-  
-  console_log(&format!(
-    "Width: {}, Height: {}, Start: ({}, {}), Goal: ({}, {}), Distance: {:.2}, Gradient: {:.4}",
-    width, height, start_node.0, start_node.1, end_node.0, end_node.1, d, gradient
-  ));
 
   let successors = |&(x, y): &(usize, usize)| -> Vec<((usize, usize), i32)> {
     // Track exploration for visualization
