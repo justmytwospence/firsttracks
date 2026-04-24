@@ -1,317 +1,399 @@
 'use client';
 
-import type { ExplorationNode } from '@/hooks/usePathfinder';
 import L from 'leaflet';
-import { useEffect, useRef } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react';
 import { useMap } from 'react-leaflet';
 
-interface LeafletExplorationLayerProps {
-  nodes: ExplorationNode[];
-  /** Fade out duration in ms */
-  fadeOutDuration?: number;
-  /** Point radius in pixels (only used in 'points' mode) */
-  radius?: number;
-  /** Point/line color */
-  color?: string;
-  /** How long points stay fully visible before fading (ms) */
-  persistDuration?: number;
-  /** Visualization mode: 'points' for individual dots, 'boundary' for connected frontier line */
-  mode?: 'points' | 'boundary';
-  /** Line width for boundary mode */
-  lineWidth?: number;
+export interface ExplorationData {
+  cells: Uint16Array;
+  originX: number;
+  originY: number;
+  scaleX: number;
+  scaleY: number;
 }
 
-// DEM cell size is approximately 1/10800 degrees (~10m at equator)
-const CELL_SIZE = 1 / 10800;
-const INV_CELL_SIZE = 10800; // Pre-computed inverse for faster multiplication
+export interface ExplorationLayerHandle {
+  addCells: (data: ExplorationData) => void;
+  flush: () => void;
+  clear: () => void;
+}
 
-// Pre-allocated arrays for neighbor offsets (8-connectivity)
-const NEIGHBOR_DX = [-1, 0, 1, -1, 1, -1, 0, 1];
-const NEIGHBOR_DY = [-1, -1, -1, 0, 0, 1, 1, 1];
+interface LeafletExplorationLayerProps {
+  color?: string;
+}
+
+// Target visual duration for a full exploration animation. Soft goal: if the
+// underlying search finishes faster, animation finishes faster too; if it's
+// slower, we stretch until we've caught up then track arrival rate.
+const TARGET_DURATION_MS = 10_000;
+
+// Minimum cells rendered per frame while the pacer is active. Floor below which
+// the animation would feel frozen to the eye.
+const MIN_CELLS_PER_FRAME = 32;
+
+// When `flush()` is called (pathfinding completed), drain any queued cells over
+// this window so the user sees the final state settle before `clear()` fires.
+const FLUSH_DRAIN_MS = 200;
+
+// Cells outside the current offscreen canvas trigger a resize. Reserve this
+// much headroom each resize so the canvas doesn't have to reallocate on every
+// cell at the leading edge.
+const BOUNDS_GROW_MARGIN = 64;
+
+interface PendingBatch {
+  cells: Uint16Array;
+  originX: number;
+  originY: number;
+  scaleX: number;
+  scaleY: number;
+}
 
 /**
- * Canvas-based Leaflet layer for visualizing A* exploration in real-time.
- * Uses a custom L.Layer subclass for optimal performance.
+ * Canvas-based frontier visualization with paced reveal.
+ *
+ * Incoming cell batches are buffered and drained on a RAF loop that targets a
+ * perceptually-constant ~10 s reveal regardless of how fast or slow the
+ * underlying A* search is running. Cells are drawn onto an OffscreenCanvas in
+ * grid space, then blitted to the visible Leaflet overlay with a geo transform.
  */
-export function LeafletExplorationLayer({
-  nodes,
-  fadeOutDuration = 2000,
-  radius = 2,
-  color = 'rgba(59, 130, 246, 0.8)', // blue-500 with alpha
-  persistDuration = 500,
-  mode = 'points',
-  lineWidth = 2,
-}: LeafletExplorationLayerProps) {
-  const map = useMap();
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const layerRef = useRef<L.Layer | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const nodesRef = useRef<ExplorationNode[]>([]);
-  const lastNodesLengthRef = useRef<number>(0);
-  const needsRedrawRef = useRef<boolean>(true);
-  
-  // Reusable data structures to avoid GC pressure
-  const gridSetRef = useRef<Set<number>>(new Set());
-  const nodesByGridRef = useRef<Map<number, ExplorationNode>>(new Map());
-  const drawnEdgesRef = useRef<Set<number>>(new Set());
-  
-  // Keep nodes ref updated and mark for redraw
-  useEffect(() => {
-    nodesRef.current = nodes;
-    needsRedrawRef.current = true;
-  }, [nodes]);
-  
-  // Create and add canvas layer
-  useEffect(() => {
-    // Create custom canvas layer
-    const CanvasLayer = L.Layer.extend({
-      onAdd(leafletMap: L.Map) {
-        const size = leafletMap.getSize();
-        const canvas = L.DomUtil.create('canvas', 'leaflet-exploration-layer');
-        canvas.width = size.x;
-        canvas.height = size.y;
-        canvas.style.position = 'absolute';
-        canvas.style.top = '0';
-        canvas.style.left = '0';
-        canvas.style.pointerEvents = 'none';
-        canvas.style.zIndex = '400'; // Above tiles, below markers
-        
-        canvasRef.current = canvas;
-        
-        const pane = leafletMap.getPane('overlayPane');
-        if (pane) {
-          pane.appendChild(canvas);
-        }
-        
-        // Handle map move/resize - mark for redraw
-        const markRedraw = () => { needsRedrawRef.current = true; };
-        leafletMap.on('move', this._updatePosition, this);
-        leafletMap.on('move', markRedraw);
-        leafletMap.on('resize', this._onResize, this);
-        leafletMap.on('zoom', markRedraw);
-        
-        this._updatePosition();
-      },
-      
-      onRemove(leafletMap: L.Map) {
-        if (canvasRef.current) {
-          canvasRef.current.remove();
-          canvasRef.current = null;
-        }
-        leafletMap.off('move', this._updatePosition, this);
-        leafletMap.off('resize', this._onResize, this);
-      },
-      
-      _updatePosition() {
-        if (!canvasRef.current) return;
-        const pos = map.containerPointToLayerPoint([0, 0]);
-        L.DomUtil.setPosition(canvasRef.current, pos);
-        needsRedrawRef.current = true;
-      },
-      
-      _onResize() {
-        if (!canvasRef.current) return;
-        const size = map.getSize();
-        canvasRef.current.width = size.x;
-        canvasRef.current.height = size.y;
-        needsRedrawRef.current = true;
-      },
-    });
-    
-    const layer = new CanvasLayer();
-    layer.addTo(map);
-    layerRef.current = layer;
-    
-    return () => {
-      if (layerRef.current) {
-        map.removeLayer(layerRef.current);
-        layerRef.current = null;
-      }
-    };
-  }, [map]);
-  
-  // Animation loop
-  useEffect(() => {
-    const render = () => {
+export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, LeafletExplorationLayerProps>(
+  function LeafletExplorationLayer({ color = 'rgba(59, 130, 246, 0.4)' }, ref) {
+    const map = useMap();
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const layerRef = useRef<L.Layer | null>(null);
+
+    // Offscreen canvas for accumulating cells (in grid space)
+    const offscreenRef = useRef<OffscreenCanvas | null>(null);
+    const offscreenCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
+
+    // Grid bounds the offscreen canvas currently covers
+    const gridBoundsRef = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
+    const geoTransformRef = useRef<{ originX: number; originY: number; scaleX: number; scaleY: number } | null>(null);
+
+    const hasCellsRef = useRef(false);
+
+    // Blit RAF control (runs whenever the offscreen or the map changes)
+    const blitRafIdRef = useRef<number | null>(null);
+    const needsBlitRef = useRef(false);
+
+    // Reveal pacer state
+    const pendingRef = useRef<PendingBatch[]>([]);
+    const firstArrivalTimeRef = useRef<number | null>(null);
+    const revealRafIdRef = useRef<number | null>(null);
+    const isFlushingRef = useRef(false);
+    const flushStartTimeRef = useRef(0);
+
+    const colorRef = useRef(color);
+    colorRef.current = color;
+
+    // Blit offscreen canvas to visible canvas with geo transform
+    const blit = useCallback(() => {
       const canvas = canvasRef.current;
-      if (!canvas) {
-        animationFrameRef.current = requestAnimationFrame(render);
+      const offscreen = offscreenRef.current;
+      const transform = geoTransformRef.current;
+      const gridBounds = gridBoundsRef.current;
+
+      blitRafIdRef.current = null;
+
+      if (!canvas || !offscreen || !transform || !gridBounds || !hasCellsRef.current) {
+        needsBlitRef.current = false;
         return;
       }
-      
+
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        animationFrameRef.current = requestAnimationFrame(render);
+        needsBlitRef.current = false;
         return;
       }
-      
-      // Clear canvas
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      const now = Date.now();
-      const currentNodes = nodesRef.current;
-      
-      // Parse base color to get RGB values
-      const baseColor = color.match(/[\d.]+/g);
-      const r = baseColor ? Number.parseInt(baseColor[0]) : 59;
-      const g = baseColor ? Number.parseInt(baseColor[1]) : 130;
-      const b = baseColor ? Number.parseInt(baseColor[2]) : 246;
-      const baseAlpha = baseColor?.[3] ? Number.parseFloat(baseColor[3]) : 0.8;
-      
-      if (mode === 'boundary') {
-        // Boundary mode: draw edges between adjacent frontier points on the grid
-        const visibleNodes = currentNodes.filter(node => {
-          const age = now - node.timestamp;
-          return age <= persistDuration + fadeOutDuration;
-        });
-        
-        if (visibleNodes.length < 2) {
-          animationFrameRef.current = requestAnimationFrame(render);
-          return;
+
+      const topLeftGeo: [number, number] = [
+        transform.originY + gridBounds.minY * transform.scaleY,
+        transform.originX + gridBounds.minX * transform.scaleX,
+      ];
+      const bottomRightGeo: [number, number] = [
+        transform.originY + (gridBounds.maxY + 1) * transform.scaleY,
+        transform.originX + (gridBounds.maxX + 1) * transform.scaleX,
+      ];
+
+      const topLeftScreen = map.latLngToContainerPoint(topLeftGeo);
+      const bottomRightScreen = map.latLngToContainerPoint(bottomRightGeo);
+
+      const destWidth = bottomRightScreen.x - topLeftScreen.x;
+      const destHeight = bottomRightScreen.y - topLeftScreen.y;
+
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(
+        offscreen,
+        0, 0, offscreen.width, offscreen.height,
+        topLeftScreen.x, topLeftScreen.y, destWidth, destHeight,
+      );
+      ctx.globalAlpha = 1;
+
+      needsBlitRef.current = false;
+    }, [map]);
+
+    const scheduleBlit = useCallback(() => {
+      if (!needsBlitRef.current) {
+        needsBlitRef.current = true;
+        blitRafIdRef.current = requestAnimationFrame(blit);
+      }
+    }, [blit]);
+
+    // Draw a set of cells to the offscreen canvas, expanding bounds as needed.
+    const drawCells = useCallback((
+      cells: Uint16Array,
+      transform: { originX: number; originY: number; scaleX: number; scaleY: number },
+    ) => {
+      if (cells.length === 0) return;
+
+      // Capture geo transform on first cell ever drawn this session.
+      if (!geoTransformRef.current) {
+        geoTransformRef.current = { ...transform };
+      }
+
+      // Bounds of the incoming cells.
+      let cellMinX = Number.POSITIVE_INFINITY;
+      let cellMinY = Number.POSITIVE_INFINITY;
+      let cellMaxX = Number.NEGATIVE_INFINITY;
+      let cellMaxY = Number.NEGATIVE_INFINITY;
+      for (let i = 0; i < cells.length; i += 2) {
+        const x = cells[i];
+        const y = cells[i + 1];
+        if (x < cellMinX) cellMinX = x;
+        if (y < cellMinY) cellMinY = y;
+        if (x > cellMaxX) cellMaxX = x;
+        if (y > cellMaxY) cellMaxY = y;
+      }
+
+      const prevBounds = gridBoundsRef.current;
+      const needsExpand = !prevBounds ||
+        cellMinX < prevBounds.minX || cellMinY < prevBounds.minY ||
+        cellMaxX > prevBounds.maxX || cellMaxY > prevBounds.maxY;
+
+      if (needsExpand) {
+        // Grow with a margin so we don't reallocate on every cell at the frontier.
+        const newMinX = prevBounds
+          ? Math.min(prevBounds.minX, cellMinX - BOUNDS_GROW_MARGIN)
+          : cellMinX - BOUNDS_GROW_MARGIN;
+        const newMinY = prevBounds
+          ? Math.min(prevBounds.minY, cellMinY - BOUNDS_GROW_MARGIN)
+          : cellMinY - BOUNDS_GROW_MARGIN;
+        const newMaxX = prevBounds
+          ? Math.max(prevBounds.maxX, cellMaxX + BOUNDS_GROW_MARGIN)
+          : cellMaxX + BOUNDS_GROW_MARGIN;
+        const newMaxY = prevBounds
+          ? Math.max(prevBounds.maxY, cellMaxY + BOUNDS_GROW_MARGIN)
+          : cellMaxY + BOUNDS_GROW_MARGIN;
+
+        const newWidth = newMaxX - newMinX + 1;
+        const newHeight = newMaxY - newMinY + 1;
+
+        const newOffscreen = new OffscreenCanvas(newWidth, newHeight);
+        const newCtx = newOffscreen.getContext('2d');
+        if (!newCtx) return;
+
+        if (offscreenRef.current && prevBounds) {
+          const offsetX = prevBounds.minX - newMinX;
+          const offsetY = prevBounds.minY - newMinY;
+          newCtx.drawImage(offscreenRef.current, offsetX, offsetY);
         }
-        
-        // Reuse data structures - clear instead of recreating
-        const gridSet = gridSetRef.current;
-        const nodesByGrid = nodesByGridRef.current;
-        const drawnEdges = drawnEdgesRef.current;
-        gridSet.clear();
-        nodesByGrid.clear();
-        drawnEdges.clear();
-        
-        // Use integer grid keys for faster hashing
-        // Combine gx and gy into a single number: gx * 1000000 + gy (assumes grid coords < 1M)
-        const toGridKey = (lon: number, lat: number): number => {
-          const gx = Math.round(lon * INV_CELL_SIZE);
-          const gy = Math.round(lat * INV_CELL_SIZE);
-          return gx * 1000000 + gy;
-        };
-        
-        // Build grid lookup
-        for (let i = 0; i < visibleNodes.length; i++) {
-          const node = visibleNodes[i];
-          const key = toGridKey(node.lon, node.lat);
-          gridSet.add(key);
-          nodesByGrid.set(key, node);
-        }
-        
-        // Calculate average alpha
-        let totalAlpha = 0;
-        for (let i = 0; i < visibleNodes.length; i++) {
-          const node = visibleNodes[i];
-          const age = now - node.timestamp;
-          let alpha = baseAlpha;
-          if (age > persistDuration) {
-            const fadeProgress = (age - persistDuration) / fadeOutDuration;
-            alpha = baseAlpha * (1 - fadeProgress);
-          }
-          totalAlpha += alpha;
-        }
-        const avgAlpha = totalAlpha / visibleNodes.length;
-        
-        // Draw edges only between adjacent grid cells (8-connectivity)
-        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${avgAlpha})`;
-        ctx.lineWidth = lineWidth;
-        ctx.beginPath();
-        
-        for (let i = 0; i < visibleNodes.length; i++) {
-          const node = visibleNodes[i];
-          const gx = Math.round(node.lon * INV_CELL_SIZE);
-          const gy = Math.round(node.lat * INV_CELL_SIZE);
-          
-          // Check all 8 neighbors using pre-allocated offset arrays
-          for (let n = 0; n < 8; n++) {
-            const ngx = gx + NEIGHBOR_DX[n];
-            const ngy = gy + NEIGHBOR_DY[n];
-            const neighborKey = ngx * 1000000 + ngy;
-            
-            if (gridSet.has(neighborKey)) {
-              // Create edge key - use consistent ordering to avoid duplicates
-              const edgeKey = gx < ngx || (gx === ngx && gy < ngy)
-                ? gx * 1e12 + gy * 1e6 + ngx * 1e3 + ngy
-                : ngx * 1e12 + ngy * 1e6 + gx * 1e3 + gy;
-              
-              if (!drawnEdges.has(edgeKey)) {
-                drawnEdges.add(edgeKey);
-                
-                const neighbor = nodesByGrid.get(neighborKey);
-                if (neighbor) {
-                  const p1 = map.latLngToContainerPoint([node.lat, node.lon]);
-                  const p2 = map.latLngToContainerPoint([neighbor.lat, neighbor.lon]);
-                  ctx.moveTo(p1.x, p1.y);
-                  ctx.lineTo(p2.x, p2.y);
-                }
-              }
-            }
-          }
-        }
-        
-        ctx.stroke();
+
+        offscreenRef.current = newOffscreen;
+        offscreenCtxRef.current = newCtx;
+        gridBoundsRef.current = { minX: newMinX, minY: newMinY, maxX: newMaxX, maxY: newMaxY };
+      }
+
+      const offCtx = offscreenCtxRef.current;
+      const bounds = gridBoundsRef.current;
+      if (!offCtx || !bounds) return;
+
+      const match = colorRef.current.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      offCtx.fillStyle = match
+        ? `rgb(${match[1]}, ${match[2]}, ${match[3]})`
+        : 'rgb(59, 130, 246)';
+
+      for (let i = 0; i < cells.length; i += 2) {
+        const x = cells[i] - bounds.minX;
+        const y = cells[i + 1] - bounds.minY;
+        offCtx.fillRect(x, y, 1, 1);
+      }
+
+      hasCellsRef.current = true;
+      scheduleBlit();
+    }, [scheduleBlit]);
+
+    // RAF-driven pacer: pulls cells from the pending queue and draws them at a
+    // rate that targets TARGET_DURATION_MS (or FLUSH_DRAIN_MS when flushing).
+    const revealStep = useCallback(() => {
+      revealRafIdRef.current = null;
+
+      const pending = pendingRef.current;
+      if (pending.length === 0) {
+        isFlushingRef.current = false;
+        return;
+      }
+
+      const now = performance.now();
+
+      let totalPending = 0;
+      for (const b of pending) totalPending += b.cells.length >>> 1;
+
+      let remainingMs: number;
+      if (isFlushingRef.current) {
+        remainingMs = FLUSH_DRAIN_MS - (now - flushStartTimeRef.current);
       } else {
-        // Points mode: draw individual dots with batched drawing by alpha
-        // Group points by alpha to minimize fillStyle changes
-        const TWO_PI = Math.PI * 2;
-        const nodeCount = currentNodes.length;
-        
-        // Pre-calculate visible points and their alphas
-        for (let i = 0; i < nodeCount; i++) {
-          const node = currentNodes[i];
-          const age = now - node.timestamp;
-          
-          // Skip if fully faded
-          if (age > persistDuration + fadeOutDuration) continue;
-          
-          // Calculate opacity
-          let alpha = baseAlpha;
-          if (age > persistDuration) {
-            const fadeProgress = (age - persistDuration) / fadeOutDuration;
-            alpha = baseAlpha * (1 - fadeProgress);
-          }
-          
-          if (alpha <= 0) continue;
-          
-          // Convert lat/lng to container point
-          const point = map.latLngToContainerPoint([node.lat, node.lon]);
-          
-          // Draw point - batch begin/fill for same alpha
-          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
-          ctx.beginPath();
-          ctx.arc(point.x, point.y, radius, 0, TWO_PI);
-          ctx.fill();
+        const elapsed = firstArrivalTimeRef.current !== null ? now - firstArrivalTimeRef.current : 0;
+        remainingMs = TARGET_DURATION_MS - elapsed;
+      }
+
+      let cellsToReveal: number;
+      if (remainingMs <= 16.7) {
+        // Budget exhausted — drain everything this frame so we don't fall further behind.
+        cellsToReveal = totalPending;
+      } else {
+        const framesLeft = remainingMs / 16.7;
+        cellsToReveal = Math.max(Math.ceil(totalPending / framesLeft), MIN_CELLS_PER_FRAME);
+      }
+
+      let revealed = 0;
+      while (revealed < cellsToReveal && pending.length > 0) {
+        const head = pending[0];
+        const available = head.cells.length >>> 1;
+        const wanted = cellsToReveal - revealed;
+
+        if (wanted >= available) {
+          drawCells(head.cells, head);
+          revealed += available;
+          pending.shift();
+        } else {
+          const slice = head.cells.subarray(0, wanted * 2);
+          drawCells(slice, head);
+          head.cells = head.cells.subarray(wanted * 2);
+          revealed += wanted;
         }
       }
-      
-      animationFrameRef.current = requestAnimationFrame(render);
-    };
-    
-    animationFrameRef.current = requestAnimationFrame(render);
-    
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
+
+      if (pending.length > 0) {
+        revealRafIdRef.current = requestAnimationFrame(revealStep);
+      } else {
+        isFlushingRef.current = false;
       }
-    };
-  }, [map, fadeOutDuration, radius, color, persistDuration, mode, lineWidth]);
-  
-  // Re-render on map events
-  useEffect(() => {
-    const updateCanvas = () => {
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const size = map.getSize();
-        if (canvas.width !== size.x || canvas.height !== size.y) {
+    }, [drawCells]);
+
+    useImperativeHandle(ref, () => ({
+      addCells: (data: ExplorationData) => {
+        pendingRef.current.push({
+          cells: data.cells,
+          originX: data.originX,
+          originY: data.originY,
+          scaleX: data.scaleX,
+          scaleY: data.scaleY,
+        });
+        if (firstArrivalTimeRef.current === null) {
+          firstArrivalTimeRef.current = performance.now();
+        }
+        if (revealRafIdRef.current === null) {
+          revealRafIdRef.current = requestAnimationFrame(revealStep);
+        }
+      },
+      flush: () => {
+        if (pendingRef.current.length === 0) return;
+        isFlushingRef.current = true;
+        flushStartTimeRef.current = performance.now();
+        if (revealRafIdRef.current === null) {
+          revealRafIdRef.current = requestAnimationFrame(revealStep);
+        }
+      },
+      clear: () => {
+        pendingRef.current = [];
+        firstArrivalTimeRef.current = null;
+        isFlushingRef.current = false;
+
+        offscreenRef.current = null;
+        offscreenCtxRef.current = null;
+        gridBoundsRef.current = null;
+        geoTransformRef.current = null;
+        hasCellsRef.current = false;
+
+        if (revealRafIdRef.current !== null) {
+          cancelAnimationFrame(revealRafIdRef.current);
+          revealRafIdRef.current = null;
+        }
+        if (blitRafIdRef.current !== null) {
+          cancelAnimationFrame(blitRafIdRef.current);
+          blitRafIdRef.current = null;
+        }
+        needsBlitRef.current = false;
+
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const ctx = canvas.getContext('2d');
+          ctx?.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      },
+    }), [revealStep]);
+
+    // Create canvas layer
+    useEffect(() => {
+      const mapInstance = map;
+
+      const CanvasLayer = L.Layer.extend({
+        onAdd(leafletMap: L.Map) {
+          const size = leafletMap.getSize();
+
+          const canvas = L.DomUtil.create('canvas', 'leaflet-exploration-layer');
           canvas.width = size.x;
           canvas.height = size.y;
-        }
-      }
-    };
-    
-    map.on('zoom zoomend moveend resize', updateCanvas);
-    
-    return () => {
-      map.off('zoom zoomend moveend resize', updateCanvas);
-    };
-  }, [map]);
-  
-  return null;
-}
+          canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400';
+          canvasRef.current = canvas;
+
+          leafletMap.getPane('overlayPane')?.appendChild(canvas);
+          leafletMap.on('move', this._updatePosition, this);
+          leafletMap.on('moveend', this._onMoveEnd, this);
+          leafletMap.on('resize', this._onResize, this);
+          this._updatePosition();
+        },
+        onRemove(leafletMap: L.Map) {
+          canvasRef.current?.remove();
+          canvasRef.current = null;
+          leafletMap.off('move', this._updatePosition, this);
+          leafletMap.off('moveend', this._onMoveEnd, this);
+          leafletMap.off('resize', this._onResize, this);
+        },
+        _updatePosition() {
+          if (!canvasRef.current) return;
+          L.DomUtil.setPosition(canvasRef.current, mapInstance.containerPointToLayerPoint([0, 0]));
+        },
+        _onMoveEnd() {
+          if (hasCellsRef.current) {
+            scheduleBlit();
+          }
+        },
+        _onResize() {
+          const size = mapInstance.getSize();
+          if (canvasRef.current) {
+            canvasRef.current.width = size.x;
+            canvasRef.current.height = size.y;
+          }
+          if (hasCellsRef.current) {
+            scheduleBlit();
+          }
+        },
+      });
+
+      const layer = new CanvasLayer();
+      layer.addTo(map);
+      layerRef.current = layer;
+
+      return () => {
+        if (layerRef.current) map.removeLayer(layerRef.current);
+        if (blitRafIdRef.current !== null) cancelAnimationFrame(blitRafIdRef.current);
+        if (revealRafIdRef.current !== null) cancelAnimationFrame(revealRafIdRef.current);
+      };
+    }, [map, scheduleBlit]);
+
+    return null;
+  },
+);
