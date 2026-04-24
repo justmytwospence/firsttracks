@@ -22,39 +22,20 @@ interface LeafletExplorationLayerProps {
   color?: string;
 }
 
-// Target visual duration for a full exploration animation. Soft goal: if the
-// underlying search finishes faster, animation finishes faster too; if it's
-// slower, we stretch until we've caught up then track arrival rate.
-const TARGET_DURATION_MS = 10_000;
-
-// Minimum cells rendered per frame while the pacer is active. Floor below which
-// the animation would feel frozen to the eye.
-const MIN_CELLS_PER_FRAME = 32;
-
-// When `flush()` is called (pathfinding completed), drain any queued cells over
-// this window so the user sees the final state settle before `clear()` fires.
-const FLUSH_DRAIN_MS = 200;
-
-// Cells outside the current offscreen canvas trigger a resize. Reserve this
-// much headroom each resize so the canvas doesn't have to reallocate on every
-// cell at the leading edge.
+// Reserve this much headroom on each offscreen-canvas resize so the canvas
+// doesn't have to reallocate on every cell arriving at the leading edge.
 const BOUNDS_GROW_MARGIN = 64;
 
-interface PendingBatch {
-  cells: Uint16Array;
-  originX: number;
-  originY: number;
-  scaleX: number;
-  scaleY: number;
-}
-
 /**
- * Canvas-based frontier visualization with paced reveal.
+ * Canvas-based exploration frontier overlay.
  *
- * Incoming cell batches are buffered and drained on a RAF loop that targets a
- * perceptually-constant ~10 s reveal regardless of how fast or slow the
- * underlying A* search is running. Cells are drawn onto an OffscreenCanvas in
- * grid space, then blitted to the visible Leaflet overlay with a geo transform.
+ * Cells arrive via `addCells` (usually from the pathfinder worker at ~33 ms
+ * cadence) and are drawn immediately into an OffscreenCanvas in grid space.
+ * The offscreen is blitted to the visible Leaflet overlay on the next RAF,
+ * applying a geo transform so cells land at their real-world locations.
+ *
+ * Pacing is handled upstream by the Rust tracker's wall-clock flush cadence —
+ * this layer trusts whatever arrives and renders it promptly.
  */
 export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, LeafletExplorationLayerProps>(
   function LeafletExplorationLayer({ color = 'rgba(59, 130, 246, 0.4)' }, ref) {
@@ -62,49 +43,36 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const layerRef = useRef<L.Layer | null>(null);
 
-    // Offscreen canvas for accumulating cells (in grid space)
+    // Offscreen canvas for accumulating cells in grid space.
     const offscreenRef = useRef<OffscreenCanvas | null>(null);
     const offscreenCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
 
-    // Grid bounds the offscreen canvas currently covers
+    // Grid bounds the offscreen canvas currently covers (includes margin).
     const gridBoundsRef = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const geoTransformRef = useRef<{ originX: number; originY: number; scaleX: number; scaleY: number } | null>(null);
 
     const hasCellsRef = useRef(false);
 
-    // Blit RAF control (runs whenever the offscreen or the map changes)
+    // Blit RAF control.
     const blitRafIdRef = useRef<number | null>(null);
     const needsBlitRef = useRef(false);
-
-    // Reveal pacer state
-    const pendingRef = useRef<PendingBatch[]>([]);
-    const firstArrivalTimeRef = useRef<number | null>(null);
-    const revealRafIdRef = useRef<number | null>(null);
-    const isFlushingRef = useRef(false);
-    const flushStartTimeRef = useRef(0);
 
     const colorRef = useRef(color);
     colorRef.current = color;
 
-    // Blit offscreen canvas to visible canvas with geo transform
     const blit = useCallback(() => {
+      blitRafIdRef.current = null;
+      needsBlitRef.current = false;
+
       const canvas = canvasRef.current;
       const offscreen = offscreenRef.current;
       const transform = geoTransformRef.current;
       const gridBounds = gridBoundsRef.current;
 
-      blitRafIdRef.current = null;
-
-      if (!canvas || !offscreen || !transform || !gridBounds || !hasCellsRef.current) {
-        needsBlitRef.current = false;
-        return;
-      }
+      if (!canvas || !offscreen || !transform || !gridBounds || !hasCellsRef.current) return;
 
       const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        needsBlitRef.current = false;
-        return;
-      }
+      if (!ctx) return;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -130,30 +98,24 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
         topLeftScreen.x, topLeftScreen.y, destWidth, destHeight,
       );
       ctx.globalAlpha = 1;
-
-      needsBlitRef.current = false;
     }, [map]);
 
     const scheduleBlit = useCallback(() => {
-      if (!needsBlitRef.current) {
-        needsBlitRef.current = true;
-        blitRafIdRef.current = requestAnimationFrame(blit);
-      }
+      if (needsBlitRef.current) return;
+      needsBlitRef.current = true;
+      blitRafIdRef.current = requestAnimationFrame(blit);
     }, [blit]);
 
-    // Draw a set of cells to the offscreen canvas, expanding bounds as needed.
     const drawCells = useCallback((
       cells: Uint16Array,
       transform: { originX: number; originY: number; scaleX: number; scaleY: number },
     ) => {
       if (cells.length === 0) return;
 
-      // Capture geo transform on first cell ever drawn this session.
       if (!geoTransformRef.current) {
         geoTransformRef.current = { ...transform };
       }
 
-      // Bounds of the incoming cells.
       let cellMinX = Number.POSITIVE_INFINITY;
       let cellMinY = Number.POSITIVE_INFINITY;
       let cellMaxX = Number.NEGATIVE_INFINITY;
@@ -173,7 +135,6 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
         cellMaxX > prevBounds.maxX || cellMaxY > prevBounds.maxY;
 
       if (needsExpand) {
-        // Grow with a margin so we don't reallocate on every cell at the frontier.
         const newMinX = prevBounds
           ? Math.min(prevBounds.minX, cellMinX - BOUNDS_GROW_MARGIN)
           : cellMinX - BOUNDS_GROW_MARGIN;
@@ -224,103 +185,22 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
       scheduleBlit();
     }, [scheduleBlit]);
 
-    // RAF-driven pacer: pulls cells from the pending queue and draws them at a
-    // rate that targets TARGET_DURATION_MS (or FLUSH_DRAIN_MS when flushing).
-    const revealStep = useCallback(() => {
-      revealRafIdRef.current = null;
-
-      const pending = pendingRef.current;
-      if (pending.length === 0) {
-        isFlushingRef.current = false;
-        return;
-      }
-
-      const now = performance.now();
-
-      let totalPending = 0;
-      for (const b of pending) totalPending += b.cells.length >>> 1;
-
-      let remainingMs: number;
-      if (isFlushingRef.current) {
-        remainingMs = FLUSH_DRAIN_MS - (now - flushStartTimeRef.current);
-      } else {
-        const elapsed = firstArrivalTimeRef.current !== null ? now - firstArrivalTimeRef.current : 0;
-        remainingMs = TARGET_DURATION_MS - elapsed;
-      }
-
-      let cellsToReveal: number;
-      if (remainingMs <= 16.7) {
-        // Budget exhausted — drain everything this frame so we don't fall further behind.
-        cellsToReveal = totalPending;
-      } else {
-        const framesLeft = remainingMs / 16.7;
-        cellsToReveal = Math.max(Math.ceil(totalPending / framesLeft), MIN_CELLS_PER_FRAME);
-      }
-
-      let revealed = 0;
-      while (revealed < cellsToReveal && pending.length > 0) {
-        const head = pending[0];
-        const available = head.cells.length >>> 1;
-        const wanted = cellsToReveal - revealed;
-
-        if (wanted >= available) {
-          drawCells(head.cells, head);
-          revealed += available;
-          pending.shift();
-        } else {
-          const slice = head.cells.subarray(0, wanted * 2);
-          drawCells(slice, head);
-          head.cells = head.cells.subarray(wanted * 2);
-          revealed += wanted;
-        }
-      }
-
-      if (pending.length > 0) {
-        revealRafIdRef.current = requestAnimationFrame(revealStep);
-      } else {
-        isFlushingRef.current = false;
-      }
-    }, [drawCells]);
-
     useImperativeHandle(ref, () => ({
       addCells: (data: ExplorationData) => {
-        pendingRef.current.push({
-          cells: data.cells,
-          originX: data.originX,
-          originY: data.originY,
-          scaleX: data.scaleX,
-          scaleY: data.scaleY,
-        });
-        if (firstArrivalTimeRef.current === null) {
-          firstArrivalTimeRef.current = performance.now();
-        }
-        if (revealRafIdRef.current === null) {
-          revealRafIdRef.current = requestAnimationFrame(revealStep);
-        }
+        drawCells(data.cells, data);
       },
       flush: () => {
-        if (pendingRef.current.length === 0) return;
-        isFlushingRef.current = true;
-        flushStartTimeRef.current = performance.now();
-        if (revealRafIdRef.current === null) {
-          revealRafIdRef.current = requestAnimationFrame(revealStep);
-        }
+        // All cells have been drawn synchronously as they arrived;
+        // just make sure a final blit is queued so the last batch is visible.
+        if (hasCellsRef.current) scheduleBlit();
       },
       clear: () => {
-        pendingRef.current = [];
-        firstArrivalTimeRef.current = null;
-        isFlushingRef.current = false;
-
         offscreenRef.current = null;
         offscreenCtxRef.current = null;
         gridBoundsRef.current = null;
         geoTransformRef.current = null;
         hasCellsRef.current = false;
 
-        if (revealRafIdRef.current !== null) {
-          cancelAnimationFrame(revealRafIdRef.current);
-          revealRafIdRef.current = null;
-        }
         if (blitRafIdRef.current !== null) {
           cancelAnimationFrame(blitRafIdRef.current);
           blitRafIdRef.current = null;
@@ -333,9 +213,8 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
           ctx?.clearRect(0, 0, canvas.width, canvas.height);
         }
       },
-    }), [revealStep]);
+    }), [drawCells, scheduleBlit]);
 
-    // Create canvas layer
     useEffect(() => {
       const mapInstance = map;
 
@@ -367,9 +246,7 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
           L.DomUtil.setPosition(canvasRef.current, mapInstance.containerPointToLayerPoint([0, 0]));
         },
         _onMoveEnd() {
-          if (hasCellsRef.current) {
-            scheduleBlit();
-          }
+          if (hasCellsRef.current) scheduleBlit();
         },
         _onResize() {
           const size = mapInstance.getSize();
@@ -377,9 +254,7 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
             canvasRef.current.width = size.x;
             canvasRef.current.height = size.y;
           }
-          if (hasCellsRef.current) {
-            scheduleBlit();
-          }
+          if (hasCellsRef.current) scheduleBlit();
         },
       });
 
@@ -390,7 +265,6 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
       return () => {
         if (layerRef.current) map.removeLayer(layerRef.current);
         if (blitRafIdRef.current !== null) cancelAnimationFrame(blitRafIdRef.current);
-        if (revealRafIdRef.current !== null) cancelAnimationFrame(revealRafIdRef.current);
       };
     }, [map, scheduleBlit]);
 

@@ -543,14 +543,13 @@ export default function PathFinderPage() {
     forceFullRepathRef.current = false;
   }, []);
 
-  // Called when exploration queue is fully processed
+  // Called when exploration is done so the user sees the final state briefly
+  // before the overlay clears.
   const handleExplorationComplete = useCallback(() => {
-    // Drain any remaining queued cells quickly (~200ms) so the final state
-    // settles before the clear timer fires.
     explorationLayerRef.current?.flush();
     setTimeout(() => {
       explorationLayerRef.current?.clear();
-    }, 800);
+    }, 500);
   }, []);
 
   const handleSetPath = useCallback(
