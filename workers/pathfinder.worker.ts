@@ -88,6 +88,8 @@ export interface RawExplorationData {
   originY: number;         // Geo origin latitude
   scaleX: number;          // Pixel scale X (degrees/pixel)
   scaleY: number;          // Pixel scale Y (degrees/pixel, negative)
+  width: number;           // Full raster width in cells
+  height: number;          // Full raster height in cells
 }
 
 /**
@@ -102,6 +104,8 @@ export interface ExplorationUpdate {
   originY: number;
   scaleX: number;
   scaleY: number;
+  width: number;
+  height: number;
 }
 
 export interface PathResult {
@@ -241,6 +245,8 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
         originY: data.originY,
         scaleX: data.scaleX,
         scaleY: data.scaleY,
+        width: data.width,
+        height: data.height,
       } satisfies ExplorationUpdate);
     };
     

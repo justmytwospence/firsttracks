@@ -142,6 +142,8 @@ interface FindPathButtonProps {
     originY: number;
     scaleX: number;
     scaleY: number;
+    width: number;
+    height: number;
   }) => void;
   onExplorationComplete?: () => void;
   onStartPathfinding?: () => void;
@@ -407,6 +409,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                   originY: event.data.originY as number,
                   scaleX: event.data.scaleX as number,
                   scaleY: event.data.scaleY as number,
+                  width: event.data.width as number,
+                  height: event.data.height as number,
                 });
               } else if (event.data.type === "path_result") {
                 worker.removeEventListener("message", handler);

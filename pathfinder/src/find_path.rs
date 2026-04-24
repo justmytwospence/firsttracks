@@ -64,6 +64,8 @@ struct ExplorationTracker {
   explored_set: HashSet<(usize, usize)>,
   pixel_scale: (f64, f64),
   origin: (f64, f64),
+  raster_width: u32,
+  raster_height: u32,
   last_flush_idx: usize,
   last_flush_time_ms: f64,
   nodes_since_time_check: u32,
@@ -76,6 +78,7 @@ impl ExplorationTracker {
   fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, _batch_size: usize) -> Self {
     let origin = geotiff.origin().unwrap_or([0.0, 0.0]);
     let pixel_scale_arr = geotiff.pixel_size().unwrap_or([1.0/10800.0, -1.0/10800.0]);
+    let (raster_width, raster_height) = geotiff.image_info().dimensions.unwrap_or((1, 1));
 
     Self {
       callback,
@@ -83,6 +86,8 @@ impl ExplorationTracker {
       explored_set: HashSet::with_capacity(50000),
       pixel_scale: (pixel_scale_arr[0], pixel_scale_arr[1]),
       origin: (origin[0], origin[1]),
+      raster_width,
+      raster_height,
       last_flush_idx: 0,
       last_flush_time_ms: js_sys::Date::now(),
       nodes_since_time_check: 0,
@@ -126,6 +131,8 @@ impl ExplorationTracker {
     js_sys::Reflect::set(&obj, &"originY".into(), &JsValue::from_f64(self.origin.1)).unwrap();
     js_sys::Reflect::set(&obj, &"scaleX".into(), &JsValue::from_f64(self.pixel_scale.0)).unwrap();
     js_sys::Reflect::set(&obj, &"scaleY".into(), &JsValue::from_f64(self.pixel_scale.1)).unwrap();
+    js_sys::Reflect::set(&obj, &"width".into(), &JsValue::from_f64(self.raster_width as f64)).unwrap();
+    js_sys::Reflect::set(&obj, &"height".into(), &JsValue::from_f64(self.raster_height as f64)).unwrap();
 
     let cells = js_sys::Uint16Array::new_with_length((new_cells.len() * 2) as u32);
     for (i, &(x, y)) in new_cells.iter().enumerate() {
