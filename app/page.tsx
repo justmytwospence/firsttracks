@@ -25,7 +25,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
-import type { ExplorationNode } from "@/hooks/usePathfinder";
 import { type AzimuthData, type Bounds, cacheAzimuths, expandBounds, findCachedAzimuthBoundsContaining, getAzimuthsWithContainsCheck, getCachedIndividualTilesBounds, getDEMWithContainsCheck, getFirstCachedAzimuths } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
 import { formatSlope, gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
@@ -48,6 +47,9 @@ const LeafletPathfindingLayer = dynamic(() => import("@/components/leaflet-pathf
 const LeafletRasterLayer = dynamic(() => import("@/components/leaflet-raster-layer"), { ssr: false });
 const LeafletExplorationLayer = dynamic(() => import("@/components/leaflet-exploration-layer").then(mod => ({ default: mod.LeafletExplorationLayer })), { ssr: false });
 
+// Import the handle type for the exploration layer ref
+import type { ExplorationLayerHandle } from "@/components/leaflet-exploration-layer";
+
 export default function PathFinderPage() {
   const [waypoints, setWaypoints] = useState<Point[]>([]);
   const [waypointIds, setWaypointIds] = useState<number[]>([]);
@@ -66,8 +68,8 @@ export default function PathFinderPage() {
   const [isPortrait, setIsPortrait] = useState(false);
   const [chartsDockOpen, setChartsDockOpen] = useState(true);
   const [selectedChart, setSelectedChart] = useState<"elevation" | "gradient">("elevation");
-  const [explorationNodes, setExplorationNodes] = useState<ExplorationNode[]>([]);
   const [showFrontier, setShowFrontier] = useState(true);
+  const explorationLayerRef = useRef<ExplorationLayerHandle>(null);
   const [avoidRunoutZones, setAvoidRunoutZones] = useState(true);
   const [cachedBounds, setCachedBounds] = useState<Bounds | null>(null);
   const [dataBounds, setDataBounds] = useState<Bounds | null>(null);
@@ -134,7 +136,7 @@ export default function PathFinderPage() {
     const newWaypoints = waypoints.slice(0, -1);
     setWaypoints(newWaypoints);
     setWaypointIds(prev => prev.slice(0, -1));
-    setExplorationNodes([]);
+    explorationLayerRef.current?.clear();
     
     // If we're going from 2+ waypoints down to 1 or 0, we need to trim the path
     if (waypoints.length >= 2 && path) {
@@ -499,7 +501,7 @@ export default function PathFinderPage() {
     setIsLoading(false);
     setPathAspects(null);
     setAspectRaster(null);
-    setExplorationNodes([]);
+    explorationLayerRef.current?.clear();
     explorationStartTimeRef.current = 0;
     explorationCountRef.current = 0;
     lastAutoPathfindingCount.current = 0;
@@ -520,16 +522,21 @@ export default function PathFinderPage() {
   }, []);
 
   // Callback for exploration updates from pathfinder
-  // Only show frontier (current batch), not accumulated nodes
-  const handleExplorationUpdate = useCallback((nodes: ExplorationNode[]) => {
-    explorationCountRef.current += nodes.length;
-    // Replace with just the frontier nodes (current batch)
-    setExplorationNodes(nodes);
+  // Uses imperative API to bypass React state for performance
+  const handleExplorationUpdate = useCallback((data: {
+    cells: Uint16Array;
+    originX: number;
+    originY: number;
+    scaleX: number;
+    scaleY: number;
+  }) => {
+    explorationCountRef.current += data.cells.length / 2;
+    explorationLayerRef.current?.addCells(data);
   }, []);
 
   // Clear exploration nodes when starting a new pathfinding run
   const handleStartPathfinding = useCallback(() => {
-    setExplorationNodes([]);
+    explorationLayerRef.current?.clear();
     explorationStartTimeRef.current = Date.now();
     explorationCountRef.current = 0;
     // Reset the force full repath flag
@@ -538,8 +545,12 @@ export default function PathFinderPage() {
 
   // Called when exploration queue is fully processed
   const handleExplorationComplete = useCallback(() => {
-    // Clear the frontier visualization after animation completes
-    setExplorationNodes([]);
+    // Drain any remaining queued cells quickly (~200ms) so the final state
+    // settles before the clear timer fires.
+    explorationLayerRef.current?.flush();
+    setTimeout(() => {
+      explorationLayerRef.current?.clear();
+    }, 800);
   }, []);
 
   const handleSetPath = useCallback(
@@ -611,7 +622,7 @@ export default function PathFinderPage() {
     setDataBounds(null);
     setPathAspects(null);
     setAspectRaster(null);
-    setExplorationNodes([]);
+    explorationLayerRef.current?.clear();
     explorationStartTimeRef.current = 0;
     explorationCountRef.current = 0;
     lastAutoPathfindingCount.current = 0;
@@ -620,64 +631,44 @@ export default function PathFinderPage() {
 
   // Handle waypoint drag end - update waypoint position and trigger full re-pathfinding
   const handleMarkerDragEnd = useCallback((index: number, newPosition: Point) => {
-    console.log('=== handleMarkerDragEnd ===');
-    console.log('Dragging waypoint at index:', index);
-    console.log('Current waypointIds:', JSON.stringify(waypointIds));
-    console.log('Current waypoints count:', waypoints.length);
-    
     setWaypoints(prev => {
       const newWaypoints = [...prev];
       newWaypoints[index] = newPosition;
-      console.log('Updated waypoint at index', index, 'new waypoints count:', newWaypoints.length);
       return newWaypoints;
     });
-    
+
     // Clear the path and trigger re-pathfinding
     setPath(null);
     setPathSegmentBoundaries([]);
     setPathAspects(null);
-    setExplorationNodes([]);
-    
+    explorationLayerRef.current?.clear();
+
     // Force full re-pathfinding (not just last segment)
     forceFullRepathRef.current = true;
-    
+
     // Trigger re-pathfinding after a small delay
     setTimeout(() => {
-      console.log('Triggering findPath click, forceFullRepath:', forceFullRepathRef.current);
       findPathRef.current?.click();
     }, 100);
-  }, [waypointIds, waypoints.length]);
+  }, []);
 
   // Handle click on path to insert a new waypoint
   const handlePathClick = useCallback((point: Point, segmentIndex: number) => {
-    console.log('=== handlePathClick START ===');
-    console.log('segmentIndex:', segmentIndex);
-    console.log('pathSegmentBoundaries:', JSON.stringify(pathSegmentBoundaries));
-    console.log('current waypointIds:', JSON.stringify(waypointIds));
-    console.log('current waypoints count:', waypoints.length);
-    
     // Use pathSegmentBoundaries to determine which waypoint segment was clicked
     let insertAfterWaypointIndex = 0;
-    
+
     if (pathSegmentBoundaries.length > 0) {
       for (let i = 0; i < pathSegmentBoundaries.length; i++) {
-        console.log(`Checking: segmentIndex ${segmentIndex} <= boundaries[${i}] (${pathSegmentBoundaries[i]})?`);
         if (segmentIndex <= pathSegmentBoundaries[i]) {
           insertAfterWaypointIndex = i;
-          console.log(`Found! insertAfterWaypointIndex = ${i}`);
           break;
         }
         insertAfterWaypointIndex = pathSegmentBoundaries.length;
       }
-    } else {
-      console.log('pathSegmentBoundaries is EMPTY!');
     }
-    
-    console.log('Final insertAfterWaypointIndex:', insertAfterWaypointIndex);
-    console.log('Will insert at array index:', insertAfterWaypointIndex + 1);
-    
+
     const newId = nextWaypointIdRef.current++;
-    
+
     setWaypoints(prev => {
       const newWaypoints = [...prev];
       newWaypoints.splice(insertAfterWaypointIndex + 1, 0, point);
@@ -687,7 +678,6 @@ export default function PathFinderPage() {
     setWaypointIds(prev => {
       const newIds = [...prev];
       newIds.splice(insertAfterWaypointIndex + 1, 0, newId);
-      console.log('New waypointIds after insert:', JSON.stringify(newIds));
       return newIds;
     });
     setPathSegmentBoundaries(prev => {
@@ -695,11 +685,9 @@ export default function PathFinderPage() {
       // Insert the new boundary at the click position
       // This splits the segment: the new segment ends at segmentIndex
       newBoundaries.splice(insertAfterWaypointIndex, 0, segmentIndex);
-      console.log('New pathSegmentBoundaries after insert:', JSON.stringify(newBoundaries));
       return newBoundaries;
     });
-    console.log('=== handlePathClick END ===');
-  }, [pathSegmentBoundaries, waypointIds, waypoints.length]);
+  }, [pathSegmentBoundaries]);
 
   const handleDownloadGpx = async () => {
     if (!path) return;
@@ -753,7 +741,7 @@ export default function PathFinderPage() {
       // Clear existing state
       setPathAspects(null);
       setAspectRaster(null);
-      setExplorationNodes([]);
+      explorationLayerRef.current?.clear();
       explorationStartTimeRef.current = 0;
       explorationCountRef.current = 0;
       lastAutoPathfindingCount.current = 0;
@@ -1346,15 +1334,10 @@ export default function PathFinderPage() {
               dragEndTimeRef={markerDragEndTimeRef}
             />
             {/* Exploration visualization during pathfinding - show frontier */}
-            {showFrontier && explorationNodes.length > 0 && (
+            {showFrontier && (
               <LeafletExplorationLayer
-                nodes={explorationNodes}
-                fadeOutDuration={0}
-                persistDuration={100000}
-                radius={3}
+                ref={explorationLayerRef}
                 color="rgba(59, 130, 246, 0.8)"
-                mode="boundary"
-                lineWidth={2}
               />
             )}
             {path && bounds && (

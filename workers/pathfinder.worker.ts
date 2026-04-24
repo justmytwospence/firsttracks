@@ -19,8 +19,6 @@ export interface PathfinderRequest {
   excludedAspects: string[];
   gradientsBuffer: Uint8Array;
   aspectGradientThreshold: number | null;
-  explorationBatchSize?: number;
-  explorationDelayMs?: number;
   runoutZonesBuffer?: Uint8Array;
 }
 
@@ -80,11 +78,30 @@ export interface ComputeRunoutResult {
   runout_zones: Uint8Array;
 }
 
+/**
+ * Raw exploration data from Rust WASM.
+ * Contains grid cells and geo transform for rendering directly.
+ */
+export interface RawExplorationData {
+  cells: Uint16Array;      // Flat array of [x, y, x, y, ...] grid coords
+  originX: number;         // Geo origin longitude
+  originY: number;         // Geo origin latitude
+  scaleX: number;          // Pixel scale X (degrees/pixel)
+  scaleY: number;          // Pixel scale Y (degrees/pixel, negative)
+}
+
+/**
+ * Exploration update sent to main thread with raw cell data.
+ * Canvas will render cells directly for smooth visualization.
+ */
 export interface ExplorationUpdate {
   type: 'exploration';
   id: string;
-  nodes: [number, number][]; // [lon, lat] pairs
-  delayMs?: number; // Optional delay for animation pacing
+  cells: Uint16Array;      // Raw grid cells from Rust
+  originX: number;
+  originY: number;
+  scaleX: number;
+  scaleY: number;
 }
 
 export interface PathResult {
@@ -172,7 +189,7 @@ async function ensureWasmInit(): Promise<void> {
 }
 
 /**
- * Handle pathfinding request
+ * Handle pathfinding request with callback-based exploration updates
  */
 async function handleFindPath(request: PathfinderRequest): Promise<void> {
   const { 
@@ -185,30 +202,12 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     excludedAspects, 
     gradientsBuffer,
     aspectGradientThreshold,
-    explorationBatchSize = 125,
-    explorationDelayMs = 0,
     runoutZonesBuffer
   } = request;
   
   try {
-    console.log('[Worker] Starting pathfinding...', { start, end, maxGradient, explorationBatchSize, explorationDelayMs });
     await ensureWasmInit();
-    console.log('[Worker] WASM initialized');
     
-    // Create exploration callback that posts updates to main thread
-    // Note: WASM calls this synchronously, so we post the message but delay happens client-side
-    const explorationCallback = (nodes: [number, number][]) => {
-      console.log('[Worker] Exploration callback called with', nodes.length, 'nodes');
-      self.postMessage({
-        type: 'exploration',
-        id,
-        nodes,
-        delayMs: explorationDelayMs
-      } satisfies ExplorationUpdate);
-    };
-    
-    // Call the WASM pathfinding function
-    // Wrap coordinates in GeoJSON Point format as expected by Rust
     const startGeoJson = JSON.stringify({
       type: "Point",
       coordinates: start
@@ -216,22 +215,6 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     const endGeoJson = JSON.stringify({
       type: "Point", 
       coordinates: end
-    });
-    
-    console.log('[Worker] Calling find_path_rs with:', {
-      elevationsBufferLength: elevationsBuffer.length,
-      elevationsBufferByteLength: elevationsBuffer.byteLength,
-      elevationsBufferDetached: elevationsBuffer.buffer.byteLength === 0,
-      azimuthsBufferLength: azimuthsBuffer.length,
-      azimuthsBufferDetached: azimuthsBuffer.buffer.byteLength === 0,
-      gradientsBufferLength: gradientsBuffer.length,
-      gradientsBufferDetached: gradientsBuffer.buffer.byteLength === 0,
-      runoutZonesBufferLength: runoutZonesBuffer?.length,
-      runoutZonesBufferDetached: runoutZonesBuffer ? runoutZonesBuffer.buffer.byteLength === 0 : 'N/A',
-      startGeoJson,
-      endGeoJson,
-      excludedAspects,
-      explorationBatchSize
     });
     
     // Validate buffers aren't detached
@@ -248,6 +231,19 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
       throw new Error('runoutZonesBuffer is detached');
     }
     
+    // Callback just forwards raw data to main thread - no computation here
+    const explorationCallback = (data: RawExplorationData) => {
+      self.postMessage({
+        type: 'exploration',
+        id,
+        cells: data.cells,
+        originX: data.originX,
+        originY: data.originY,
+        scaleX: data.scaleX,
+        scaleY: data.scaleY,
+      } satisfies ExplorationUpdate);
+    };
+    
     const resultJson = find_path_rs(
       elevationsBuffer,
       startGeoJson,
@@ -258,11 +254,9 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
       gradientsBuffer,
       aspectGradientThreshold,
       explorationCallback,
-      explorationBatchSize,
+      500, // batch size
       runoutZonesBuffer ?? null
     );
-    
-    console.log('[Worker] Path found, result length:', resultJson.length);
     
     self.postMessage({
       type: 'path_result',
@@ -280,7 +274,6 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     } else if (error && typeof error === 'object' && 'message' in error) {
       message = String((error as { message: unknown }).message);
     } else {
-      // Try to extract message from JsValue or other objects
       try {
         message = String(error);
       } catch {

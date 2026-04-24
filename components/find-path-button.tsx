@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import type { ExplorationNode } from "@/hooks/usePathfinder";
 import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
@@ -137,12 +136,16 @@ interface FindPathButtonProps {
     gradientRaster: Uint8Array,
     runoutRaster?: Uint8Array
   ) => void;
-  onExplorationUpdate?: (nodes: ExplorationNode[]) => void;
+  onExplorationUpdate?: (data: {
+    cells: Uint16Array;
+    originX: number;
+    originY: number;
+    scaleX: number;
+    scaleY: number;
+  }) => void;
   onExplorationComplete?: () => void;
   onStartPathfinding?: () => void;
   onDataBoundsChange?: (bounds: Bounds) => void;
-  explorationBatchSize?: number;
-  explorationDelayMs?: number;
   className?: string;
   onlyLastSegment?: boolean;
   preloadBounds?: Bounds | null;
@@ -178,8 +181,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       onExplorationComplete,
       onStartPathfinding,
       onDataBoundsChange,
-      explorationBatchSize = 125,
-      explorationDelayMs = 10,
       className,
       onlyLastSegment = false,
       preloadBounds,
@@ -189,9 +190,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
   ) {
     const workerRef = useRef<Worker | null>(null);
     const [workerReady, setWorkerReady] = useState(false);
-    const explorationQueueRef = useRef<ExplorationNode[][]>([]);
-    const processingRef = useRef(false);
-    const batchCountRef = useRef(0);
     const shouldStopRef = useRef(false);
     const cachedAzimuthsRef = useRef<AzimuthData | null>(null);
     const currentPathfindingIdRef = useRef<string | null>(null);
@@ -199,34 +197,26 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
     const lastSuccessfulWaypointCountRef = useRef(0);
     const preloadingRef = useRef(false);
     const lastPreloadedBoundsRef = useRef<string | null>(null);
-    
+
     // Stop exploration animation and cancel pathfinding when waypoints are cleared or reduced (undo)
     useEffect(() => {
       const waypointCountDecreased = waypoints.length < prevWaypointCountRef.current;
       prevWaypointCountRef.current = waypoints.length;
-      
+
       if (waypoints.length === 0) {
         shouldStopRef.current = true;
-        explorationQueueRef.current = [];
-        processingRef.current = false;
-        batchCountRef.current = 0;
-        cachedAzimuthsRef.current = null; // Clear cached azimuths when waypoints reset
-        currentPathfindingIdRef.current = null; // Cancel any in-progress pathfinding
-        preloadingRef.current = false; // Allow new preloading
-        lastSuccessfulWaypointCountRef.current = 0; // Reset incremental pathfinding tracker
+        cachedAzimuthsRef.current = null;
+        currentPathfindingIdRef.current = null;
+        preloadingRef.current = false;
+        lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
         toast.dismiss();
       } else if (waypointCountDecreased && isLoading) {
-        // Undo while pathfinding - cancel the current operation
         shouldStopRef.current = true;
-        explorationQueueRef.current = [];
-        processingRef.current = false;
-        batchCountRef.current = 0;
         currentPathfindingIdRef.current = null;
-        lastSuccessfulWaypointCountRef.current = 0; // Reset so next pathfind is full
+        lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
         toast.dismiss();
-        // Reset shouldStop so future pathfinding can work
         setTimeout(() => { shouldStopRef.current = false; }, 0);
       } else {
         shouldStopRef.current = false;
@@ -248,39 +238,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       }
     }, [excludedAspects]);
     
-    // Process exploration queue - skip more batches as iteration count increases
-    const processExplorationQueue = useCallback(async () => {
-      if (processingRef.current) return;
-      processingRef.current = true;
-      
-      while (explorationQueueRef.current.length > 0 && !shouldStopRef.current) {
-        batchCountRef.current += 1;
-        
-        // Calculate how many batches to skip: floor(batchNumber / 5)
-        // Batches 1-4: show every batch, 5-9: skip 1, 10-14: skip 2, etc.
-        const skipCount = Math.floor(batchCountRef.current / 5);
-        
-        // Skip batches by just discarding them
-        for (let i = 0; i < skipCount && explorationQueueRef.current.length > 1; i++) {
-          explorationQueueRef.current.shift();
-          batchCountRef.current += 1;
-        }
-        
-        const batch = explorationQueueRef.current.shift();
-        if (batch) {
-          onExplorationUpdate?.(batch);
-          // Small fixed delay for rendering
-          await new Promise(resolve => requestAnimationFrame(resolve));
-        }
-      }
-      
-      // Signal that exploration animation is complete (only if not stopped)
-      if (!shouldStopRef.current) {
-        onExplorationComplete?.();
-      }
-      processingRef.current = false;
-    }, [onExplorationUpdate, onExplorationComplete]);
-    
     // Initialize worker
     useEffect(() => {
       const worker = new Worker(
@@ -301,14 +258,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
     // This component only computes azimuths on-demand during pathfinding if not already cached
     
     const handleClick = useCallback(async () => {
-      console.log('=== FindPathButton handleClick START ===');
-      console.log('bounds:', bounds);
-      console.log('workerRef.current:', !!workerRef.current);
-      console.log('waypoints.length:', waypoints.length);
-      console.log('onlyLastSegment:', onlyLastSegment);
-      
       if (!bounds || !workerRef.current) {
-        console.log('Early return: bounds or worker not ready');
         return;
       }
       
@@ -318,14 +268,10 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       const waypointsOutsideBounds = waypointBounds && !boundsContain(bounds, waypointBounds);
       
       if (waypointsOutsideBounds) {
-        console.log('[FindPath] Waypoints outside current bounds, will fetch expanded data');
-        console.log('  Current bounds:', bounds);
-        console.log('  Waypoint bounds:', waypointBounds);
         // Compute new bounds that include both current bounds and waypoints (with padding)
         const combinedBounds = unionBounds(bounds, waypointBounds);
         // Expand by 1.5x to give some buffer around waypoints
         effectiveBounds = expandBounds(combinedBounds, 1.5);
-        console.log('  Expanded bounds:', effectiveBounds);
         // Invalidate cached azimuths since we're fetching new data
         cachedAzimuthsRef.current = null;
       }
@@ -339,7 +285,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       
       setIsLoading(true);
       onStartPathfinding?.();
-      batchCountRef.current = 0;
       toast.dismiss();
       
       const loadingToastId = "pathfinder-loading";
@@ -445,14 +390,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         
         const startSegment = effectiveOnlyLastSegment ? waypoints.length - 2 : 0;
         let pathSegmentCounter = effectiveOnlyLastSegment ? 1 : 0; // Start at 1 to append if effectiveOnlyLastSegment
-        console.log('FindPathButton: waypoints.length =', waypoints.length, 'onlyLastSegment =', onlyLastSegment, 'effectiveOnlyLastSegment =', effectiveOnlyLastSegment, 'lastSuccessful =', lastSuccessfulWaypointCountRef.current, 'startSegment =', startSegment);
-        
-        // Start polling the exploration queue so visualization happens during pathfinding
-        const queuePollInterval = setInterval(() => {
-          if (explorationQueueRef.current.length > 0 && !processingRef.current) {
-            processExplorationQueue();
-          }
-        }, 16); // ~60fps
         
         try {
           for (let i = startSegment; i < waypoints.length - 1; i++) {
@@ -463,19 +400,14 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               if (event.data.id !== id) return;
               
               if (event.data.type === "exploration") {
-                // Ignore if this pathfinding session was cancelled
                 if (currentPathfindingIdRef.current !== sessionId) return;
-                // Queue exploration updates for delayed processing
-                const nodes = (event.data.nodes as [number, number][]).map(
-                  ([lon, lat]) => ({
-                    lon,
-                    lat,
-                    timestamp: Date.now(),
-                  })
-                );
-                explorationQueueRef.current.push(nodes);
-                // Don't await - let it process asynchronously while pathfinding continues
-                setTimeout(() => processExplorationQueue(), 0);
+                onExplorationUpdate?.({
+                  cells: event.data.cells as Uint16Array,
+                  originX: event.data.originX as number,
+                  originY: event.data.originY as number,
+                  scaleX: event.data.scaleX as number,
+                  scaleY: event.data.scaleY as number,
+                });
               } else if (event.data.type === "path_result") {
                 worker.removeEventListener("message", handler);
                 resolve(event.data.geojson as string);
@@ -497,8 +429,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               excludedAspects,
               gradientsBuffer: new Uint8Array(azimuthData.gradients),
               aspectGradientThreshold: 0.05,
-              explorationBatchSize,
-              explorationDelayMs,
               runoutZonesBuffer: avoidRunoutZones && azimuthData.runout_zones ? new Uint8Array(azimuthData.runout_zones) : undefined,
             } as WorkerRequest);
           });
@@ -545,7 +475,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           }
         }
         } finally {
-          // Stop polling the exploration queue\n          clearInterval(queuePollInterval);
+          // Call exploration complete when done
+          onExplorationComplete?.();
         }
         
         // Track successful pathfinding waypoint count for incremental optimization
@@ -570,9 +501,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       setAspectRaster,
       onStartPathfinding,
       onDataBoundsChange,
-      processExplorationQueue,
-      explorationBatchSize,
-      explorationDelayMs,
+      onExplorationUpdate,
+      onExplorationComplete,
       onlyLastSegment,
       avoidRunoutZones,
     ]);

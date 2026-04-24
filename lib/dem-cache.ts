@@ -77,25 +77,55 @@ export function tileToLatLng(x: number, y: number, zoom: number): { lat: number;
 /**
  * Get all tile coordinates that cover a bounding box at a given zoom level.
  * Returns tiles in row-major order (left-to-right, top-to-bottom).
+ * If the bounds would require more than MAX_TILES, the bounds are shrunk
+ * toward the center to fit within the limit.
  */
 export function getTilesForBounds(bounds: Bounds, zoom: number): { x: number; y: number }[] {
   const nw = latLngToTile(bounds.north, bounds.west, zoom);
   const se = latLngToTile(bounds.south, bounds.east, zoom);
   
-  // Check tile count before allocating array
-  const tilesWide = se.x - nw.x + 1;
-  const tilesHigh = se.y - nw.y + 1;
-  const tileCount = tilesWide * tilesHigh;
+  // Check tile count and shrink if needed
+  let tilesWide = se.x - nw.x + 1;
+  let tilesHigh = se.y - nw.y + 1;
+  let tileCount = tilesWide * tilesHigh;
+  
+  // If over limit, shrink bounds toward center
+  let startX = nw.x;
+  let endX = se.x;
+  let startY = nw.y;
+  let endY = se.y;
   
   if (tileCount > MAX_TILES) {
-    throw new Error(
-      `Requested area too large: ${tileCount} tiles required (max: ${MAX_TILES}). Please zoom in or reduce the area.`
+    // Calculate scale factor to fit within MAX_TILES
+    const scaleFactor = Math.sqrt(MAX_TILES / tileCount);
+    const newTilesWide = Math.floor(tilesWide * scaleFactor);
+    const newTilesHigh = Math.floor(tilesHigh * scaleFactor);
+    
+    // Shrink from center
+    const removeX = tilesWide - newTilesWide;
+    const removeY = tilesHigh - newTilesHigh;
+    
+    startX = nw.x + Math.floor(removeX / 2);
+    endX = se.x - Math.ceil(removeX / 2);
+    startY = nw.y + Math.floor(removeY / 2);
+    endY = se.y - Math.ceil(removeY / 2);
+    
+    // Ensure at least 1 tile in each dimension
+    if (endX < startX) endX = startX;
+    if (endY < startY) endY = startY;
+    
+    tilesWide = endX - startX + 1;
+    tilesHigh = endY - startY + 1;
+    tileCount = tilesWide * tilesHigh;
+    
+    console.warn(
+      `[DEM] Bounds capped to ${tileCount} tiles (max: ${MAX_TILES}). Area reduced toward center.`
     );
   }
   
   const tiles: { x: number; y: number }[] = [];
-  for (let y = nw.y; y <= se.y; y++) {
-    for (let x = nw.x; x <= se.x; x++) {
+  for (let y = startY; y <= endY; y++) {
+    for (let x = startX; x <= endX; x++) {
       tiles.push({ x, y });
     }
   }
