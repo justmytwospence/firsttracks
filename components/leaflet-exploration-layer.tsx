@@ -24,28 +24,31 @@ interface LeafletExplorationLayerProps {
   color?: string;
 }
 
-// Visual rate of frontier expansion, in grid cells of radius per second.
-// At z14 Terrarium tiles (~10 m/cell) with the typical map zoom this is
-// roughly 500 screen px / 10 s, which reads as a smooth "ping" expanding
-// outward. The natural A* expansion is constant *area* per second, which
-// means the raw radial rate drops as 1/r — buffering cells by distance and
-// releasing them at this fixed rate converts that into a perceptually
-// constant-speed wavefront.
-const RADIAL_SPEED_CELLS_PER_SEC = 50;
+// Target reveal rate. Sized below A*'s peak emission rate so a buffer builds
+// up during the fast early phase and smooths the visible motion through the
+// slower late phase — the user sees a consistent cells/sec rate throughout
+// instead of a burst-then-crawl. Cells are drawn in A*'s cost order, so the
+// directional bias toward the goal stays visible.
+const CELLS_PER_SECOND = 8000;
+const CELLS_PER_FRAME = Math.max(1, Math.ceil(CELLS_PER_SECOND / 60));
 
 // When flush() is called (pathfinding complete), drain the remaining
-// buckets over this window so the final state settles smoothly.
-const FLUSH_DRAIN_MS = 300;
+// cells over at most this window so the final state settles smoothly.
+const MAX_FLUSH_DRAIN_MS = 800;
+
+interface PendingBatch {
+  cells: Uint16Array;
+  cursor: number; // index into cells[] of the next *cell* (pair) to draw
+}
 
 /**
- * Canvas-based exploration frontier overlay with radial pacing.
+ * Canvas-based exploration frontier overlay.
  *
- * The pathfinder's A* search explores at ~constant area/sec, so the natural
- * radius grows as sqrt(t) and the leading edge appears to slow as the disc
- * gets bigger. This layer intercepts incoming cells, buckets them by
- * distance from the search start, and reveals rings at a constant radial
- * rate — so the visible frontier advances at a steady speed regardless of
- * how fast or slow the underlying search is running.
+ * Incoming cells are queued and revealed at a constant rate (~8000 cells/s)
+ * in arrival order — A*'s cost order — so the goal-directed search pattern
+ * stays visible while the visible motion rate stays steady. A buffer
+ * naturally accumulates during the fast early phase and drains through the
+ * slower late phase.
  *
  * The offscreen canvas is allocated once to the full DEM raster on the
  * first batch; every cell draw is a single fillRect at its grid coords.
@@ -70,34 +73,22 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
       height: number;
     } | null>(null);
 
-    // Radial pacer state.
-    const startCellRef = useRef<{ x: number; y: number } | null>(null);
-    const sessionStartMsRef = useRef<number | null>(null);
-    // buckets[r] holds a flat [x0, y0, x1, y1, ...] of cells at integer radius r.
-    const bucketsRef = useRef<Map<number, number[]>>(new Map());
-    const nextRadiusRef = useRef(0);
-    const maxPopulatedRadiusRef = useRef(0);
-
+    // Reveal queue and pacer state.
+    const pendingRef = useRef<PendingBatch[]>([]);
+    const pendingCellCountRef = useRef(0);
+    const revealRafIdRef = useRef<number | null>(null);
     const isFlushingRef = useRef(false);
     const flushStartMsRef = useRef(0);
-    const flushFromRadiusRef = useRef(0);
+    const flushStartPendingRef = useRef(0);
 
     const hasCellsRef = useRef(false);
 
-    // RAF control
+    // Blit RAF control
     const blitRafIdRef = useRef<number | null>(null);
     const needsBlitRef = useRef(false);
-    const revealRafIdRef = useRef<number | null>(null);
 
     const colorRef = useRef(color);
     colorRef.current = color;
-
-    // Draw a single cell to the offscreen (no bounds/transform work — just a fillRect).
-    const drawCell = useCallback((x: number, y: number) => {
-      const ctx = offscreenCtxRef.current;
-      if (!ctx) return;
-      ctx.fillRect(x, y, 1, 1);
-    }, []);
 
     const blit = useCallback(() => {
       blitRafIdRef.current = null;
@@ -141,73 +132,83 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
       blitRafIdRef.current = requestAnimationFrame(blit);
     }, [blit]);
 
-    // Draw every cell in a bucket (flat [x, y, x, y, ...] array).
-    const drainBucket = useCallback((bucket: number[]) => {
+    // Draw `count` cells starting from the head of the pending queue.
+    // Returns the number of cells actually drawn.
+    const drawFromQueue = useCallback((count: number): number => {
       const ctx = offscreenCtxRef.current;
-      if (!ctx) return;
-      for (let i = 0; i < bucket.length; i += 2) {
-        ctx.fillRect(bucket[i], bucket[i + 1], 1, 1);
+      if (!ctx) return 0;
+
+      const pending = pendingRef.current;
+      let drawn = 0;
+      while (drawn < count && pending.length > 0) {
+        const head = pending[0];
+        const available = (head.cells.length >>> 1) - head.cursor;
+        const want = count - drawn;
+        const take = Math.min(available, want);
+
+        const end = head.cursor + take;
+        for (let i = head.cursor; i < end; i++) {
+          const x = head.cells[i * 2];
+          const y = head.cells[i * 2 + 1];
+          ctx.fillRect(x, y, 1, 1);
+        }
+        head.cursor = end;
+        drawn += take;
+
+        if (head.cursor >= head.cells.length >>> 1) {
+          pending.shift();
+        }
       }
+      pendingCellCountRef.current -= drawn;
+      if (drawn > 0) hasCellsRef.current = true;
+      return drawn;
     }, []);
 
     const revealStep = useCallback(() => {
       revealRafIdRef.current = null;
 
-      const buckets = bucketsRef.current;
-      if (buckets.size === 0) {
+      const pending = pendingRef.current;
+      if (pending.length === 0) {
         isFlushingRef.current = false;
         return;
       }
 
-      const now = performance.now();
-
-      let revealThreshold: number;
+      let cellsThisFrame: number;
       if (isFlushingRef.current) {
+        const now = performance.now();
         const flushElapsed = now - flushStartMsRef.current;
-        const progress = Math.min(flushElapsed / FLUSH_DRAIN_MS, 1);
-        const from = flushFromRadiusRef.current;
-        revealThreshold = from + (maxPopulatedRadiusRef.current - from) * progress;
+        const remainingMs = Math.max(MAX_FLUSH_DRAIN_MS - flushElapsed, 16.7);
+        const framesLeft = remainingMs / 16.7;
+        const totalStart = flushStartPendingRef.current;
+        // Drain the flush-start backlog evenly across the remaining frames,
+        // floored at the base rate so we never go slower than normal.
+        cellsThisFrame = Math.max(
+          CELLS_PER_FRAME,
+          Math.ceil(totalStart / Math.max(framesLeft, 1)),
+        );
       } else {
-        const elapsed = sessionStartMsRef.current !== null ? now - sessionStartMsRef.current : 0;
-        revealThreshold = (RADIAL_SPEED_CELLS_PER_SEC * elapsed) / 1000;
+        cellsThisFrame = CELLS_PER_FRAME;
       }
 
-      let drewSomething = false;
-      while (nextRadiusRef.current <= revealThreshold) {
-        const bucket = buckets.get(nextRadiusRef.current);
-        if (bucket !== undefined) {
-          drainBucket(bucket);
-          buckets.delete(nextRadiusRef.current);
-          hasCellsRef.current = true;
-          drewSomething = true;
-        }
-        nextRadiusRef.current++;
-        // Cap work per frame: if we've already drained far past nextRadius
-        // but the bucket map has nothing in that range, the while loop is
-        // O(skipped radii) per frame; cheap but let's avoid runaway numbers.
-        if (nextRadiusRef.current > maxPopulatedRadiusRef.current + 1 && buckets.size === 0) {
-          break;
-        }
-      }
+      const drew = drawFromQueue(cellsThisFrame);
+      if (drew > 0) scheduleBlit();
 
-      if (drewSomething) scheduleBlit();
-
-      if (buckets.size > 0) {
+      if (pendingRef.current.length > 0) {
         revealRafIdRef.current = requestAnimationFrame(revealStep);
       } else {
         isFlushingRef.current = false;
       }
-    }, [drainBucket, scheduleBlit]);
+    }, [drawFromQueue, scheduleBlit]);
 
     const scheduleReveal = useCallback(() => {
       if (revealRafIdRef.current !== null) return;
       revealRafIdRef.current = requestAnimationFrame(revealStep);
     }, [revealStep]);
 
-    const addCellsInternal = useCallback((data: ExplorationData) => {
+    const enqueueBatch = useCallback((data: ExplorationData) => {
       if (data.cells.length === 0) return;
 
-      // First batch: allocate full-raster offscreen, capture transform, mark start.
+      // First batch: allocate full-raster offscreen and capture transform/color.
       if (!offscreenRef.current || !transformRef.current) {
         const offscreen = new OffscreenCanvas(data.width, data.height);
         const ctx = offscreen.getContext('2d');
@@ -228,75 +229,33 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
           width: data.width,
           height: data.height,
         };
-
-        // The first cell Rust emits is the search start (A* expands the start
-        // node first, which is the first successor call into the tracker).
-        startCellRef.current = { x: data.cells[0], y: data.cells[1] };
-        sessionStartMsRef.current = performance.now();
       }
 
-      const start = startCellRef.current;
-      if (!start) return;
-
-      const cells = data.cells;
-      const buckets = bucketsRef.current;
-      let drewImmediate = false;
-      const cutoff = nextRadiusRef.current;
-
-      for (let i = 0; i < cells.length; i += 2) {
-        const x = cells[i];
-        const y = cells[i + 1];
-        const dx = x - start.x;
-        const dy = y - start.y;
-        // Integer radius (rounded to nearest cell). Math.hypot is fine here;
-        // inner loop is only ~500 cells per 33 ms batch.
-        const r = Math.round(Math.sqrt(dx * dx + dy * dy));
-
-        if (r < cutoff) {
-          // Ring already revealed — draw this straggler immediately.
-          drawCell(x, y);
-          drewImmediate = true;
-        } else {
-          let bucket = buckets.get(r);
-          if (bucket === undefined) {
-            bucket = [];
-            buckets.set(r, bucket);
-          }
-          bucket.push(x, y);
-          if (r > maxPopulatedRadiusRef.current) maxPopulatedRadiusRef.current = r;
-        }
-      }
-
-      if (drewImmediate) {
-        hasCellsRef.current = true;
-        scheduleBlit();
-      }
-      if (buckets.size > 0) scheduleReveal();
-    }, [drawCell, scheduleBlit, scheduleReveal]);
+      pendingRef.current.push({ cells: data.cells, cursor: 0 });
+      pendingCellCountRef.current += data.cells.length >>> 1;
+      scheduleReveal();
+    }, [scheduleReveal]);
 
     useImperativeHandle(ref, () => ({
       addCells: (data: ExplorationData) => {
-        addCellsInternal(data);
+        enqueueBatch(data);
       },
       flush: () => {
-        if (bucketsRef.current.size === 0) {
+        if (pendingRef.current.length === 0) {
           if (hasCellsRef.current) scheduleBlit();
           return;
         }
         isFlushingRef.current = true;
         flushStartMsRef.current = performance.now();
-        flushFromRadiusRef.current = nextRadiusRef.current;
+        flushStartPendingRef.current = pendingCellCountRef.current;
         scheduleReveal();
       },
       clear: () => {
         offscreenRef.current = null;
         offscreenCtxRef.current = null;
         transformRef.current = null;
-        startCellRef.current = null;
-        sessionStartMsRef.current = null;
-        bucketsRef.current = new Map();
-        nextRadiusRef.current = 0;
-        maxPopulatedRadiusRef.current = 0;
+        pendingRef.current = [];
+        pendingCellCountRef.current = 0;
         isFlushingRef.current = false;
         hasCellsRef.current = false;
 
@@ -316,7 +275,7 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
           ctx?.clearRect(0, 0, canvas.width, canvas.height);
         }
       },
-    }), [addCellsInternal, scheduleBlit, scheduleReveal]);
+    }), [enqueueBatch, scheduleBlit, scheduleReveal]);
 
     useEffect(() => {
       const mapInstance = map;
