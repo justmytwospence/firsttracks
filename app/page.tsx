@@ -529,6 +529,8 @@ export default function PathFinderPage() {
     originY: number;
     scaleX: number;
     scaleY: number;
+    width: number;
+    height: number;
   }) => {
     explorationCountRef.current += data.cells.length / 2;
     explorationLayerRef.current?.addCells(data);
