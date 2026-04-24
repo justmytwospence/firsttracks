@@ -24,13 +24,18 @@ interface LeafletExplorationLayerProps {
   color?: string;
 }
 
-// Target reveal rate. Sized below A*'s peak emission rate so a buffer builds
-// up during the fast early phase and smooths the visible motion through the
-// slower late phase — the user sees a consistent cells/sec rate throughout
-// instead of a burst-then-crawl. Cells are drawn in A*'s cost order, so the
-// directional bias toward the goal stays visible.
-const CELLS_PER_SECOND = 8000;
-const CELLS_PER_FRAME = Math.max(1, Math.ceil(CELLS_PER_SECOND / 60));
+// Target visual radial expansion speed, in grid cells per second.
+// The per-frame cell reveal rate is derived from this: since a ring at
+// radius r has ~2πr cells, to advance the frontier by `RADIAL_SPEED` cells
+// per second we need to reveal ~2πr × RADIAL_SPEED cells per second. This
+// auto-scales with the current frontier radius so the visible wavefront
+// keeps a steady speed, while cells are still drawn in A*'s arrival (cost)
+// order so the goal-directed search pattern stays visible.
+const RADIAL_SPEED_CELLS_PER_SEC = 50;
+
+// Floor so the pacer never reveals fewer cells than this per frame (prevents
+// a frozen look at r ≈ 0 and during brief buffer-empty moments).
+const MIN_CELLS_PER_FRAME = 60;
 
 // When flush() is called (pathfinding complete), drain the remaining
 // cells over at most this window so the final state settles smoothly.
@@ -80,6 +85,11 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
     const isFlushingRef = useRef(false);
     const flushStartMsRef = useRef(0);
     const flushStartPendingRef = useRef(0);
+
+    // Search start cell (first cell emitted by Rust) and the largest radius
+    // seen so far — used to compute the current per-frame reveal budget.
+    const startCellRef = useRef<{ x: number; y: number } | null>(null);
+    const maxRadiusRef = useRef(0);
 
     const hasCellsRef = useRef(false);
 
@@ -183,11 +193,16 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
         // Drain the flush-start backlog evenly across the remaining frames,
         // floored at the base rate so we never go slower than normal.
         cellsThisFrame = Math.max(
-          CELLS_PER_FRAME,
+          MIN_CELLS_PER_FRAME,
           Math.ceil(totalStart / Math.max(framesLeft, 1)),
         );
       } else {
-        cellsThisFrame = CELLS_PER_FRAME;
+        // Scale with frontier radius: ring at r has ~2πr cells, so advancing
+        // the visible edge by RADIAL_SPEED cells/s needs ~2πr × RADIAL_SPEED
+        // cells/s of reveal — i.e., proportional to current max radius.
+        const r = maxRadiusRef.current;
+        const perSec = 2 * Math.PI * r * RADIAL_SPEED_CELLS_PER_SEC;
+        cellsThisFrame = Math.max(MIN_CELLS_PER_FRAME, Math.ceil(perSec / 60));
       }
 
       const drew = drawFromQueue(cellsThisFrame);
@@ -209,6 +224,8 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
       if (data.cells.length === 0) return;
 
       // First batch: allocate full-raster offscreen and capture transform/color.
+      // The first cell Rust emits is the search start (A* expands the start
+      // node first), so anchor the radius computation there.
       if (!offscreenRef.current || !transformRef.current) {
         const offscreen = new OffscreenCanvas(data.width, data.height);
         const ctx = offscreen.getContext('2d');
@@ -229,6 +246,22 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
           width: data.width,
           height: data.height,
         };
+        startCellRef.current = { x: data.cells[0], y: data.cells[1] };
+      }
+
+      // Update max radius across the new batch.
+      const start = startCellRef.current;
+      if (start) {
+        const cells = data.cells;
+        let maxSqThisBatch = 0;
+        for (let i = 0; i < cells.length; i += 2) {
+          const dx = cells[i] - start.x;
+          const dy = cells[i + 1] - start.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > maxSqThisBatch) maxSqThisBatch = d2;
+        }
+        const maxThisBatch = Math.sqrt(maxSqThisBatch);
+        if (maxThisBatch > maxRadiusRef.current) maxRadiusRef.current = maxThisBatch;
       }
 
       pendingRef.current.push({ cells: data.cells, cursor: 0 });
@@ -254,6 +287,8 @@ export const LeafletExplorationLayer = forwardRef<ExplorationLayerHandle, Leafle
         offscreenRef.current = null;
         offscreenCtxRef.current = null;
         transformRef.current = null;
+        startCellRef.current = null;
+        maxRadiusRef.current = 0;
         pendingRef.current = [];
         pendingCellCountRef.current = 0;
         isFlushingRef.current = false;
