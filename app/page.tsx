@@ -26,7 +26,8 @@ import {
 } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
 import type { ExplorationNode } from "@/hooks/usePathfinder";
-import { type Bounds, findCachedAzimuthBoundsContaining, preloadDEM } from "@/lib/dem-cache";
+import { type AzimuthData, type Bounds, cacheAzimuths, expandBounds, findCachedAzimuthBoundsContaining, getAzimuthsWithContainsCheck, getCachedIndividualTilesBounds, getDEMWithContainsCheck, getFirstCachedAzimuths } from "@/lib/dem-cache";
+import { pathfinderService } from "@/lib/pathfinder-service";
 import { formatSlope, gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
 import { hoverIndexStore as defaultHoverIndexStore, slopeUnitStore } from "@/store";
 import { saveAs } from "file-saver";
@@ -36,6 +37,7 @@ import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { SiBuymeacoffee, SiGithub } from "react-icons/si";
+import { toast } from "sonner";
 
 const parseGeoraster = require("georaster");
 
@@ -68,6 +70,7 @@ export default function PathFinderPage() {
   const [showFrontier, setShowFrontier] = useState(true);
   const [avoidRunoutZones, setAvoidRunoutZones] = useState(true);
   const [cachedBounds, setCachedBounds] = useState<Bounds | null>(null);
+  const [dataBounds, setDataBounds] = useState<Bounds | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFilename, setExportFilename] = useState("path");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -77,6 +80,9 @@ export default function PathFinderPage() {
   const touchStartTime = useRef<number>(0);
   const explorationStartTimeRef = useRef<number>(0);
   const explorationCountRef = useRef<number>(0);
+  
+  // Store current azimuth data for recombining runout when aspects change
+  const currentAzimuthDataRef = useRef<AzimuthData | null>(null);
 
   // Slope unit preference from store
   const useDegrees = slopeUnitStore((s) => s.useDegrees);
@@ -260,20 +266,198 @@ export default function PathFinderPage() {
     }
   }, [path, aspectRaster, pathAspects]);
 
-  function handleMapClick(point: Point) {
-    // On first waypoint, cache expanded bounds (3x current viewport) and preload DEM
-    if (waypoints.length === 0 && bounds) {
-      const latSpan = bounds.north - bounds.south;
-      const lngSpan = bounds.east - bounds.west;
-      const expandedBounds: Bounds = {
-        north: bounds.north + latSpan,
-        south: bounds.south - latSpan,
-        east: bounds.east + lngSpan,
-        west: bounds.west - lngSpan,
+  // Handle aspect raster updates - moved here so it can be used by preloadTerrainData
+  const handleSetAspectRaster = useCallback(
+    async (azimuths: Uint8Array, gradients: Uint8Array, runoutZones?: Uint8Array) => {
+      console.log('[Raster] handleSetAspectRaster called, runoutZones:', runoutZones?.length ?? 'undefined');
+      
+      // Create copies of the arrays to avoid detached buffer issues
+      // (buffers may have been transferred from the worker)
+      const azimuthsCopy = new Uint8Array(azimuths);
+      const gradientsCopy = new Uint8Array(gradients);
+      
+      const azimuthRaster = (await parseGeoraster(
+        azimuthsCopy.buffer as ArrayBuffer
+      )) as GeoRaster;
+
+      const gradientRaster = (await parseGeoraster(
+        gradientsCopy.buffer as ArrayBuffer
+      )) as GeoRaster;
+
+      const rastersToMerge = [azimuthRaster, gradientRaster];
+      
+      // Add runout zones raster if provided and has data
+      if (runoutZones && runoutZones.length > 0) {
+        console.log('[Raster] Parsing runout zones raster');
+        const runoutZonesCopy = new Uint8Array(runoutZones);
+        const runoutRaster = (await parseGeoraster(
+          runoutZonesCopy.buffer as ArrayBuffer
+        )) as GeoRaster;
+        rastersToMerge.push(runoutRaster);
+        console.log('[Raster] Runout raster added, bands now:', rastersToMerge.length);
+      }
+
+      const mergedRaster = rastersToMerge.reduce(
+        (result, georaster) => ({
+          ...georaster,
+          maxs: [...result.maxs, ...georaster.maxs],
+          mins: [...result.mins, ...georaster.mins],
+          ranges: [...result.ranges, georaster.ranges],
+          values: [...result.values, ...georaster.values],
+          numberOfRasters: result.values.length + georaster.values.length,
+        })
+      );
+      console.log('[Raster] Final merged raster bands:', mergedRaster.numberOfRasters);
+      setAspectRaster(mergedRaster as GeoRaster);
+    },
+    []
+  );
+
+  // Load cached tile bounds on mount to display blue box immediately
+  useEffect(() => {
+    async function loadCachedBounds() {
+      try {
+        console.log('[Startup] Loading cached data...');
+        
+        // First try individual tiles cache (new format)
+        const cachedTileBounds = await getCachedIndividualTilesBounds();
+        console.log('[Startup] Cached tile bounds:', cachedTileBounds);
+        
+        if (cachedTileBounds) {
+          console.log('[Startup] Found cached tile bounds:', cachedTileBounds);
+          setDataBounds(cachedTileBounds);
+          setCachedBounds(cachedTileBounds);
+          
+          // Also try to load cached azimuths for the raster overlay
+          const cachedAzimuths = await getAzimuthsWithContainsCheck(cachedTileBounds);
+          console.log('[Startup] Cached azimuths result:', cachedAzimuths ? 'found' : 'not found');
+          if (cachedAzimuths) {
+            console.log('[Startup] Found cached azimuths, loading raster overlay');
+            currentAzimuthDataRef.current = cachedAzimuths;
+            handleSetAspectRaster(cachedAzimuths.azimuths, cachedAzimuths.gradients, cachedAzimuths.runout_zones);
+            return; // Found everything, we're done
+          }
+        }
+        
+        // Fallback: try to get azimuths from the azimuths store directly (old format or first load)
+        console.log('[Startup] Trying fallback getFirstCachedAzimuths...');
+        const firstCachedAzimuths = await getFirstCachedAzimuths();
+        console.log('[Startup] First cached azimuths:', firstCachedAzimuths ? 'found' : 'not found');
+        if (firstCachedAzimuths?.bounds) {
+          console.log('[Startup] Found cached azimuths (fallback):', firstCachedAzimuths.bounds);
+          setDataBounds(firstCachedAzimuths.bounds);
+          setCachedBounds(firstCachedAzimuths.bounds);
+          currentAzimuthDataRef.current = firstCachedAzimuths;
+          handleSetAspectRaster(firstCachedAzimuths.azimuths, firstCachedAzimuths.gradients, firstCachedAzimuths.runout_zones);
+        } else {
+          console.log('[Startup] No cached data found');
+        }
+      } catch (error) {
+        console.warn('[Startup] Failed to load cached bounds:', error);
+      }
+    }
+    
+    loadCachedBounds();
+  }, [handleSetAspectRaster]);
+
+  // Preload DEM and compute azimuths with progress toasts
+  const preloadTerrainData = useCallback(async (preloadBounds: Bounds) => {
+    const demToastId = "dem-download";
+    const azimuthToastId = "azimuth-compute";
+    
+    try {
+      // Check if we already have azimuths cached for these bounds
+      const cachedAzimuths = await getAzimuthsWithContainsCheck(preloadBounds);
+      if (cachedAzimuths) {
+        console.log('[Preload] Using cached azimuths');
+        currentAzimuthDataRef.current = cachedAzimuths;
+        // Set data bounds from cached data
+        if (cachedAzimuths.bounds) {
+          setDataBounds(cachedAzimuths.bounds);
+        }
+        // Update aspect raster from cache
+        handleSetAspectRaster(cachedAzimuths.azimuths, cachedAzimuths.gradients, cachedAzimuths.runout_zones);
+        return;
+      }
+
+      // Step 1: Download DEM (with tile-level caching - only fetches missing tiles)
+      toast.loading("Downloading elevation data...", { id: demToastId });
+      const demGrid = await getDEMWithContainsCheck(preloadBounds);
+      toast.dismiss(demToastId);
+      
+      // Update data bounds immediately to show actual tile coverage
+      setDataBounds(demGrid.bounds);
+
+      // Step 2: Compute azimuths and runout zones for all 8 aspects
+      toast.loading("Computing terrain aspects & runout zones...", { id: azimuthToastId });
+      const azimuthResult = await pathfinderService.computeAzimuths(demGrid, excludedAspects);
+      toast.dismiss(azimuthToastId);
+
+      // Store the full azimuth data for recombining when aspects change
+      const fullAzimuthData = {
+        ...azimuthResult,
+        width: demGrid.width,
+        height: demGrid.height,
+        bounds: demGrid.bounds,
       };
+      currentAzimuthDataRef.current = fullAzimuthData;
+
+      // Cache the results using actual data bounds (not request bounds) for consistent lookup
+      await cacheAzimuths(demGrid.bounds, fullAzimuthData);
+
+      // Update the aspect raster display
+      handleSetAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
+      
+      console.log('[Preload] Terrain data ready');
+    } catch (error) {
+      toast.dismiss(demToastId);
+      toast.dismiss(azimuthToastId);
+      console.error('[Preload] Failed to preload terrain data:', error);
+      toast.error("Failed to load terrain data");
+    }
+  }, [excludedAspects, handleSetAspectRaster]);
+
+  // Compute runout zones when aspect selection changes (lazy computation)
+  useEffect(() => {
+    async function computeRunout() {
+      const data = currentAzimuthDataRef.current;
+      if (!data?.elevations_raw || !data?.azimuths_raw || !data?.gradients_raw || 
+          !data.width || !data.height || !data.bounds) {
+        console.log('[Aspect Change] No raw data available for runout computation');
+        return;
+      }
+      
+      console.log('[Aspect Change] Computing runout lazily for aspects:', excludedAspects);
+      
+      try {
+        // Use the worker to compute runout for selected aspects
+        const newRunoutZones = await pathfinderService.computeRunout(
+          data.elevations_raw,
+          data.azimuths_raw,
+          data.gradients_raw,
+          data.width,
+          data.height,
+          data.bounds,
+          excludedAspects
+        );
+        
+        // Update the raster display with new runout zones
+        handleSetAspectRaster(data.azimuths, data.gradients, newRunoutZones);
+      } catch (error) {
+        console.error('[Aspect Change] Failed to compute runout:', error);
+      }
+    }
+    
+    computeRunout();
+  }, [excludedAspects, handleSetAspectRaster]);
+
+  function handleMapClick(point: Point) {
+    // On first waypoint, cache expanded bounds (3x current viewport) and preload DEM + azimuths
+    if (waypoints.length === 0 && bounds) {
+      const expandedBounds = expandBounds(bounds, 3);
       setCachedBounds(expandedBounds);
-      // Preload DEM to IndexedDB in the background
-      preloadDEM(bounds, { expansionFactor: 3 }).catch(console.warn);
+      // Preload terrain data with progress toasts
+      preloadTerrainData(expandedBounds);
     }
     setWaypoints([...waypoints, point]);
     setWaypointIds(prev => [...prev, nextWaypointIdRef.current++]);
@@ -311,6 +495,7 @@ export default function PathFinderPage() {
     setPathSegmentBoundaries([]);
     setBounds(null);
     setCachedBounds(null);
+    setDataBounds(null);
     setIsLoading(false);
     setPathAspects(null);
     setAspectRaster(null);
@@ -319,6 +504,20 @@ export default function PathFinderPage() {
     explorationCountRef.current = 0;
     lastAutoPathfindingCount.current = 0;
   }
+
+  // Handle data bounds changes from FindPathButton (e.g., when terrain is expanded for out-of-bounds waypoints)
+  const handleDataBoundsChange = useCallback((newBounds: Bounds) => {
+    setDataBounds(newBounds);
+    // Also update cachedBounds if the new data coverage is larger
+    // This ensures subsequent pathfinding uses the expanded bounds
+    setCachedBounds(prev => {
+      if (!prev) return newBounds;
+      // Keep the larger bounds
+      const prevArea = (prev.north - prev.south) * (prev.east - prev.west);
+      const newArea = (newBounds.north - newBounds.south) * (newBounds.east - newBounds.west);
+      return newArea > prevArea ? newBounds : prev;
+    });
+  }, []);
 
   // Callback for exploration updates from pathfinder
   // Only show frontier (current batch), not accumulated nodes
@@ -409,6 +608,7 @@ export default function PathFinderPage() {
     setPath(null);
     setPathSegmentBoundaries([]);
     setCachedBounds(null);
+    setDataBounds(null);
     setPathAspects(null);
     setAspectRaster(null);
     setExplorationNodes([]);
@@ -500,46 +700,6 @@ export default function PathFinderPage() {
     });
     console.log('=== handlePathClick END ===');
   }, [pathSegmentBoundaries, waypointIds, waypoints.length]);
-
-  const handleSetAspectRaster = useCallback(
-    async (azimuths: Uint8Array, gradients: Uint8Array, runoutZones?: Uint8Array) => {
-      console.log('[Raster] handleSetAspectRaster called, runoutZones:', runoutZones?.length ?? 'undefined');
-      
-      const azimuthRaster = (await parseGeoraster(
-        azimuths.buffer as ArrayBuffer
-      )) as GeoRaster;
-
-      const gradientRaster = (await parseGeoraster(
-        gradients.buffer as ArrayBuffer
-      )) as GeoRaster;
-
-      const rastersToMerge = [azimuthRaster, gradientRaster];
-      
-      // Add runout zones raster if provided and has data
-      if (runoutZones && runoutZones.length > 0) {
-        console.log('[Raster] Parsing runout zones raster');
-        const runoutRaster = (await parseGeoraster(
-          runoutZones.buffer as ArrayBuffer
-        )) as GeoRaster;
-        rastersToMerge.push(runoutRaster);
-        console.log('[Raster] Runout raster added, bands now:', rastersToMerge.length);
-      }
-
-      const mergedRaster = rastersToMerge.reduce(
-        (result, georaster) => ({
-          ...georaster,
-          maxs: [...result.maxs, ...georaster.maxs],
-          mins: [...result.mins, ...georaster.mins],
-          ranges: [...result.ranges, georaster.ranges],
-          values: [...result.values, ...georaster.values],
-          numberOfRasters: result.values.length + georaster.values.length,
-        })
-      );
-      console.log('[Raster] Final merged raster bands:', mergedRaster.numberOfRasters);
-      setAspectRaster(mergedRaster as GeoRaster);
-    },
-    []
-  );
 
   const handleDownloadGpx = async () => {
     if (!path) return;
@@ -822,6 +982,7 @@ export default function PathFinderPage() {
                   onExplorationUpdate={handleExplorationUpdate}
                   onExplorationComplete={handleExplorationComplete}
                   onStartPathfinding={handleStartPathfinding}
+                  onDataBoundsChange={handleDataBoundsChange}
                   onlyLastSegment={path !== null && !forceFullRepathRef.current}
                   preloadBounds={cachedBounds}
                   avoidRunoutZones={avoidRunoutZones}
@@ -971,6 +1132,7 @@ export default function PathFinderPage() {
                 onExplorationUpdate={handleExplorationUpdate}
                 onExplorationComplete={handleExplorationComplete}
                 onStartPathfinding={handleStartPathfinding}
+                onDataBoundsChange={handleDataBoundsChange}
                 onlyLastSegment={path !== null && !forceFullRepathRef.current}
                 preloadBounds={cachedBounds}
                 avoidRunoutZones={avoidRunoutZones}
@@ -1212,8 +1374,8 @@ export default function PathFinderPage() {
                 avoidRunoutZones={avoidRunoutZones}
               />
             )}
-            {cachedBounds && (
-              <LeafletBoundsLayer bounds={cachedBounds} />
+            {dataBounds && (
+              <LeafletBoundsLayer bounds={dataBounds} />
             )}
           </LazyPolylineMap>
         </div>
