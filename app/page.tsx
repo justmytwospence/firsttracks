@@ -263,49 +263,45 @@ export default function PathFinderPage() {
     }
   }, [derivedPathAspects, pathAspects]);
 
-  // Handle aspect raster updates - moved here so it can be used by preloadTerrainData
+  // Build a multi-band GeoRaster from raw Float32 typed arrays — bypasses the
+  // GeoTIFF encode/decode round-trip that used to live in the worker + Rust.
   const handleSetAspectRaster = useCallback(
-    async (azimuths: Uint8Array, gradients: Uint8Array, runoutZones?: Uint8Array) => {
-      console.log('[Raster] handleSetAspectRaster called, runoutZones:', runoutZones?.length ?? 'undefined');
-      
-      // Create copies of the arrays to avoid detached buffer issues
-      // (buffers may have been transferred from the worker)
-      const azimuthsCopy = new Uint8Array(azimuths);
-      const gradientsCopy = new Uint8Array(gradients);
-      
-      const azimuthRaster = (await parseGeoraster(
-        azimuthsCopy.buffer as ArrayBuffer
-      )) as GeoRaster;
+    async (
+      azimuths: Float32Array,
+      gradients: Float32Array,
+      runoutZones: Float32Array | undefined,
+      width: number,
+      height: number,
+      bounds: Bounds,
+    ) => {
+      // Copy arrays so the underlying buffers are stable even if callers later
+      // transfer/overwrite them.
+      const azimuthsCopy = new Float32Array(azimuths);
+      const gradientsCopy = new Float32Array(gradients);
+      const runoutCopy = runoutZones && runoutZones.length > 0 ? new Float32Array(runoutZones) : undefined;
 
-      const gradientRaster = (await parseGeoraster(
-        gradientsCopy.buffer as ArrayBuffer
-      )) as GeoRaster;
+      // Reshape each 1D row-major buffer into [row][col] using subarray views (no data copy).
+      const toBand = (data: Float32Array): Float32Array[] =>
+        Array.from({ length: height }, (_, row) => data.subarray(row * width, (row + 1) * width));
 
-      const rastersToMerge = [azimuthRaster, gradientRaster];
-      
-      // Add runout zones raster if provided and has data
-      if (runoutZones && runoutZones.length > 0) {
-        console.log('[Raster] Parsing runout zones raster');
-        const runoutZonesCopy = new Uint8Array(runoutZones);
-        const runoutRaster = (await parseGeoraster(
-          runoutZonesCopy.buffer as ArrayBuffer
-        )) as GeoRaster;
-        rastersToMerge.push(runoutRaster);
-        console.log('[Raster] Runout raster added, bands now:', rastersToMerge.length);
-      }
+      const values: Float32Array[][] = [toBand(azimuthsCopy), toBand(gradientsCopy)];
+      if (runoutCopy) values.push(toBand(runoutCopy));
 
-      const mergedRaster = rastersToMerge.reduce(
-        (result, georaster) => ({
-          ...georaster,
-          maxs: [...result.maxs, ...georaster.maxs],
-          mins: [...result.mins, ...georaster.mins],
-          ranges: [...result.ranges, georaster.ranges],
-          values: [...result.values, ...georaster.values],
-          numberOfRasters: result.values.length + georaster.values.length,
-        })
-      );
-      console.log('[Raster] Final merged raster bands:', mergedRaster.numberOfRasters);
-      setAspectRaster(mergedRaster as GeoRaster);
+      const metadata = {
+        xmin: bounds.west,
+        ymin: bounds.south,
+        xmax: bounds.east,
+        ymax: bounds.north,
+        pixelWidth: (bounds.east - bounds.west) / width,
+        pixelHeight: (bounds.north - bounds.south) / height,
+        width,
+        height,
+        projection: 4326,
+        noDataValue: -1,
+      };
+
+      const raster = (await parseGeoraster(values, metadata)) as GeoRaster;
+      setAspectRaster(raster);
     },
     []
   );
@@ -331,7 +327,14 @@ export default function PathFinderPage() {
           if (cachedAzimuths) {
             console.log('[Startup] Found cached azimuths, loading raster overlay');
             currentAzimuthDataRef.current = cachedAzimuths;
-            handleSetAspectRaster(cachedAzimuths.azimuths, cachedAzimuths.gradients, cachedAzimuths.runout_zones);
+            handleSetAspectRaster(
+              cachedAzimuths.azimuths,
+              cachedAzimuths.gradients,
+              cachedAzimuths.runout_zones,
+              cachedAzimuths.width,
+              cachedAzimuths.height,
+              cachedAzimuths.bounds,
+            );
             return; // Found everything, we're done
           }
         }
@@ -345,7 +348,14 @@ export default function PathFinderPage() {
           setDataBounds(firstCachedAzimuths.bounds);
           setCachedBounds(firstCachedAzimuths.bounds);
           currentAzimuthDataRef.current = firstCachedAzimuths;
-          handleSetAspectRaster(firstCachedAzimuths.azimuths, firstCachedAzimuths.gradients, firstCachedAzimuths.runout_zones);
+          handleSetAspectRaster(
+            firstCachedAzimuths.azimuths,
+            firstCachedAzimuths.gradients,
+            firstCachedAzimuths.runout_zones,
+            firstCachedAzimuths.width,
+            firstCachedAzimuths.height,
+            firstCachedAzimuths.bounds,
+          );
         } else {
           console.log('[Startup] No cached data found');
         }
@@ -368,12 +378,15 @@ export default function PathFinderPage() {
       if (cachedAzimuths) {
         console.log('[Preload] Using cached azimuths');
         currentAzimuthDataRef.current = cachedAzimuths;
-        // Set data bounds from cached data
-        if (cachedAzimuths.bounds) {
-          setDataBounds(cachedAzimuths.bounds);
-        }
-        // Update aspect raster from cache
-        handleSetAspectRaster(cachedAzimuths.azimuths, cachedAzimuths.gradients, cachedAzimuths.runout_zones);
+        setDataBounds(cachedAzimuths.bounds);
+        handleSetAspectRaster(
+          cachedAzimuths.azimuths,
+          cachedAzimuths.gradients,
+          cachedAzimuths.runout_zones,
+          cachedAzimuths.width,
+          cachedAzimuths.height,
+          cachedAzimuths.bounds,
+        );
         return;
       }
 
@@ -402,9 +415,15 @@ export default function PathFinderPage() {
       // Cache the results using actual data bounds (not request bounds) for consistent lookup
       await cacheAzimuths(demGrid.bounds, fullAzimuthData);
 
-      // Update the aspect raster display
-      handleSetAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
-      
+      handleSetAspectRaster(
+        azimuthResult.azimuths,
+        azimuthResult.gradients,
+        azimuthResult.runout_zones,
+        fullAzimuthData.width,
+        fullAzimuthData.height,
+        fullAzimuthData.bounds,
+      );
+
       console.log('[Preload] Terrain data ready');
     } catch (error) {
       toast.dismiss(demToastId);
@@ -421,7 +440,7 @@ export default function PathFinderPage() {
   useEffect(() => {
     async function computeRunout() {
       const data = currentAzimuthDataRef.current;
-      if (!data?.elevations_raw || !data?.azimuths_raw || !data?.gradients_raw ||
+      if (!data?.elevations || !data?.azimuths || !data?.gradients ||
           !data.width || !data.height || !data.bounds) {
         return;
       }
@@ -432,15 +451,24 @@ export default function PathFinderPage() {
 
       try {
         const newRunoutZones = await pathfinderService.computeRunout(
-          data.elevations_raw,
-          data.azimuths_raw,
-          data.gradients_raw,
+          data.elevations,
+          data.azimuths,
+          data.gradients,
           data.width,
           data.height,
           data.bounds,
           excludedAspects
         );
-        handleSetAspectRaster(data.azimuths, data.gradients, newRunoutZones);
+        // Update the cached bundle so subsequent toggles compare against the latest runout.
+        currentAzimuthDataRef.current = { ...data, runout_zones: newRunoutZones };
+        handleSetAspectRaster(
+          data.azimuths,
+          data.gradients,
+          newRunoutZones,
+          data.width,
+          data.height,
+          data.bounds,
+        );
       } catch (error) {
         console.error('[Aspect Change] Failed to compute runout:', error);
         lastRunoutAspectsKeyRef.current = null;

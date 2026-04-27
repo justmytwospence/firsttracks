@@ -133,9 +133,12 @@ interface FindPathButtonProps {
   setPath: (path: LineString | null, invocationCounter: number) => void;
   setPathAspects: (aspectPoints: FeatureCollection) => void;
   setAspectRaster: (
-    azimuthRaster: Uint8Array,
-    gradientRaster: Uint8Array,
-    runoutRaster?: Uint8Array
+    azimuths: Float32Array,
+    gradients: Float32Array,
+    runout: Float32Array | undefined,
+    width: number,
+    height: number,
+    bounds: Bounds,
   ) => void;
   onExplorationUpdate?: (data: {
     cells: Uint16Array;
@@ -328,54 +331,68 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             
             const azimuthsPromise = new Promise<AzimuthData>((resolve, reject) => {
               const id = `azimuths_${Date.now()}`;
-              
+
               const handler = (event: MessageEvent<WorkerResponse>) => {
                 if (event.data.id !== id) return;
-                
+
                 worker.removeEventListener("message", handler);
-                
+
                 if (event.data.type === "error") {
                   reject(new Error(event.data.message as string));
                 } else if (event.data.type === "azimuths_result") {
                   resolve({
-                    elevations: event.data.elevations as Uint8Array,
-                    azimuths: event.data.azimuths as Uint8Array,
-                    gradients: event.data.gradients as Uint8Array,
-                    runout_zones: event.data.runout_zones as Uint8Array,
+                    elevations: event.data.elevations_raw as Float32Array,
+                    azimuths: event.data.azimuths_raw as Float32Array,
+                    gradients: event.data.gradients_raw as Float32Array,
+                    width: event.data.width as number,
+                    height: event.data.height as number,
+                    bounds: event.data.bounds as Bounds,
                   });
                 }
               };
-              
+
               worker.addEventListener("message", handler);
-              worker.postMessage({
-                type: "compute_azimuths_from_array",
-                id,
-                elevations: demGrid.data,
-                width: demGrid.width,
-                height: demGrid.height,
-                bounds: demGrid.bounds,
-                excludedAspects,
-              } as WorkerRequest);
+              worker.postMessage(
+                {
+                  type: "compute_azimuths_from_array",
+                  id,
+                  elevations: demGrid.data,
+                  width: demGrid.width,
+                  height: demGrid.height,
+                  bounds: demGrid.bounds,
+                  excludedAspects,
+                } as WorkerRequest,
+                [demGrid.data.buffer as ArrayBuffer]
+              );
             });
-            
+
             azimuthResult = await azimuthsPromise;
-            
-            // Cache the computed azimuths to IndexedDB for next session
-            // Use demGrid.bounds which represents the actual data coverage
+
+            // Cache the computed azimuths to IndexedDB for next session.
             await cacheAzimuths(demGrid.bounds, azimuthResult, excludedAspects);
           }
-          
-          // Cache in memory for subsequent pathfinding in this session
-          // Make copies to avoid detached buffer issues when posting to worker
+
+          // Cache in memory for subsequent pathfinding in this session.
+          // Make copies because we'll transfer buffers per find_path call.
           cachedAzimuthsRef.current = {
-            elevations: new Uint8Array(azimuthResult.elevations),
-            azimuths: new Uint8Array(azimuthResult.azimuths),
-            gradients: new Uint8Array(azimuthResult.gradients),
-            runout_zones: azimuthResult.runout_zones ? new Uint8Array(azimuthResult.runout_zones) : undefined,
+            elevations: new Float32Array(azimuthResult.elevations),
+            azimuths: new Float32Array(azimuthResult.azimuths),
+            gradients: new Float32Array(azimuthResult.gradients),
+            runout_zones: azimuthResult.runout_zones ? new Float32Array(azimuthResult.runout_zones) : undefined,
+            width: azimuthResult.width,
+            height: azimuthResult.height,
+            bounds: azimuthResult.bounds,
           };
-          
+
           toast.dismiss(loadingToastId);
-          setAspectRaster(azimuthResult.azimuths, azimuthResult.gradients, azimuthResult.runout_zones);
+          setAspectRaster(
+            azimuthResult.azimuths,
+            azimuthResult.gradients,
+            azimuthResult.runout_zones,
+            azimuthResult.width,
+            azimuthResult.height,
+            azimuthResult.bounds,
+          );
         }
         
         // Use the cached copy for pathfinding
@@ -426,30 +443,33 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             worker.addEventListener("message", handler);
             // Construct fresh buffers per segment so they can be transferred without
             // detaching azimuthData (which is reused for subsequent segments).
-            const elevationsBuffer = new Uint8Array(azimuthData.elevations);
-            const azimuthsBuffer = new Uint8Array(azimuthData.azimuths);
-            const gradientsBuffer = new Uint8Array(azimuthData.gradients);
-            const runoutZonesBuffer = avoidRunoutZones && azimuthData.runout_zones
-              ? new Uint8Array(azimuthData.runout_zones)
+            const elevations = new Float32Array(azimuthData.elevations);
+            const azimuths = new Float32Array(azimuthData.azimuths);
+            const gradients = new Float32Array(azimuthData.gradients);
+            const runoutZones = avoidRunoutZones && azimuthData.runout_zones
+              ? new Float32Array(azimuthData.runout_zones)
               : undefined;
             const transferList: ArrayBuffer[] = [
-              elevationsBuffer.buffer as ArrayBuffer,
-              azimuthsBuffer.buffer as ArrayBuffer,
-              gradientsBuffer.buffer as ArrayBuffer,
+              elevations.buffer as ArrayBuffer,
+              azimuths.buffer as ArrayBuffer,
+              gradients.buffer as ArrayBuffer,
             ];
-            if (runoutZonesBuffer) transferList.push(runoutZonesBuffer.buffer as ArrayBuffer);
+            if (runoutZones) transferList.push(runoutZones.buffer as ArrayBuffer);
             worker.postMessage({
               type: "find_path",
               id,
-              elevationsBuffer,
+              elevations,
+              azimuths,
+              gradients,
+              runoutZones,
+              width: azimuthData.width,
+              height: azimuthData.height,
+              bounds: azimuthData.bounds,
               start: waypoints[i].coordinates as [number, number],
               end: waypoints[i + 1].coordinates as [number, number],
               maxGradient,
-              azimuthsBuffer,
               excludedAspects,
-              gradientsBuffer,
               aspectGradientThreshold: 0.05,
-              runoutZonesBuffer,
             } as WorkerRequest, transferList);
           });
           

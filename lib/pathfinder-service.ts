@@ -24,19 +24,12 @@ interface ComputeAzimuthsFromArrayRequest {
 interface AzimuthsResult {
   type: 'azimuths_result';
   id: string;
-  elevations: Uint8Array;
-  azimuths: Uint8Array;
-  gradients: Uint8Array;
-  runout_zones?: Uint8Array;
-  /** Raw elevation data for lazy runout computation */
-  elevations_raw?: Float32Array;
-  /** Raw azimuth data for lazy runout computation */
-  azimuths_raw?: Float32Array;
-  /** Raw gradient data for lazy runout computation */
-  gradients_raw?: Float32Array;
-  width?: number;
-  height?: number;
-  bounds?: Bounds;
+  elevations_raw: Float32Array;
+  azimuths_raw: Float32Array;
+  gradients_raw: Float32Array;
+  width: number;
+  height: number;
+  bounds: Bounds;
 }
 
 interface ErrorResult {
@@ -107,13 +100,10 @@ class PathfinderService {
         } else if (event.data.type === 'azimuths_result') {
           const result = event.data as AzimuthsResult;
           resolve({
-            elevations: result.elevations,
-            azimuths: result.azimuths,
-            gradients: result.gradients,
-            runout_zones: result.runout_zones,
-            elevations_raw: result.elevations_raw,
-            azimuths_raw: result.azimuths_raw,
-            gradients_raw: result.gradients_raw,
+            elevations: result.elevations_raw,
+            azimuths: result.azimuths_raw,
+            gradients: result.gradients_raw,
+            // runout_zones is computed lazily on aspect change.
             width: result.width,
             height: result.height,
             bounds: result.bounds,
@@ -159,7 +149,7 @@ class PathfinderService {
     height: number,
     bounds: Bounds,
     excludedAspects: string[]
-  ): Promise<Uint8Array> {
+  ): Promise<Float32Array> {
     await this.init();
 
     if (!this.worker) {
@@ -168,7 +158,7 @@ class PathfinderService {
 
     const id = `compute_runout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    return new Promise<Uint8Array>((resolve, reject) => {
+    return new Promise<Float32Array>((resolve, reject) => {
       const handler = (event: MessageEvent) => {
         if (event.data.id !== id) return;
 

@@ -1,13 +1,12 @@
-use std::{cell::RefCell, collections::HashSet, f64::consts::E, io::Cursor, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, f64::consts::E, rc::Rc};
 
 use geojson::{FeatureCollection, GeoJson, Geometry, Value};
-use georaster::{geotiff::GeoTiffReader, Coordinate};
 use js_sys::Function;
 use pathfinding::directed::fringe::fringe;
 use wasm_bindgen::prelude::*;
-use crate::{azimuth::Aspect, raster::get_raster};
+use crate::azimuth::Aspect;
 
-fn parse_point_to_coordinate(point_str: &str) -> Result<Coordinate, JsValue> {
+fn parse_point_to_coordinate(point_str: &str) -> Result<(f64, f64), JsValue> {
   let geojson: GeoJson = GeoJson::from_json_value(point_str.parse().unwrap())
     .map_err(|_| JsValue::from_str("Invalid GeoJSON"))?;
 
@@ -15,7 +14,7 @@ fn parse_point_to_coordinate(point_str: &str) -> Result<Coordinate, JsValue> {
     GeoJson::Geometry(Geometry {
       value: Value::Point(coords),
       ..
-    }) => Ok(Coordinate::new(coords[1], coords[0])),
+    }) => Ok((coords[0], coords[1])),
     _ => Err(JsValue::from_str("Invalid point GeoJSON")),
   }
 }
@@ -53,11 +52,6 @@ fn cost_fn(distance: f64, gradient: f64) -> i32 {
 }
 
 /// Exploration tracker - streams newly-explored cells to JS for the animated flood-fill overlay.
-///
-/// Flushes fire on a wall-clock cadence (~33 ms) rather than on radial growth, so each batch is
-/// predictable in size and digestible on the main thread regardless of how fast or slow the
-/// search is moving through terrain. Each flush ships ONLY cells added since the previous flush
-/// (incremental), so total transfer and draw cost are O(n) over the search instead of O(n²).
 struct ExplorationTracker {
   callback: Option<Function>,
   explored_cells: Vec<(u16, u16)>,
@@ -75,17 +69,19 @@ const FLUSH_INTERVAL_MS: f64 = 33.0;
 const TIME_CHECK_NODE_STRIDE: u32 = 200;
 
 impl ExplorationTracker {
-  fn new(callback: Option<Function>, geotiff: &GeoTiffReader<Cursor<Vec<u8>>>, _batch_size: usize) -> Self {
-    let origin = geotiff.origin().unwrap_or([0.0, 0.0]);
-    let pixel_scale_arr = geotiff.pixel_size().unwrap_or([1.0/10800.0, -1.0/10800.0]);
-    let (raster_width, raster_height) = geotiff.image_info().dimensions.unwrap_or((1, 1));
-
+  fn new(
+    callback: Option<Function>,
+    origin: (f64, f64),
+    pixel_scale: (f64, f64),
+    raster_width: u32,
+    raster_height: u32,
+  ) -> Self {
     Self {
       callback,
       explored_cells: Vec::with_capacity(50000),
       explored_set: HashSet::with_capacity(50000),
-      pixel_scale: (pixel_scale_arr[0], pixel_scale_arr[1]),
-      origin: (origin[0], origin[1]),
+      pixel_scale,
+      origin,
       raster_width,
       raster_height,
       last_flush_idx: 0,
@@ -105,8 +101,6 @@ impl ExplorationTracker {
 
     self.explored_cells.push((x as u16, y as u16));
 
-    // Amortize the Date::now() call across TIME_CHECK_NODE_STRIDE nodes so the
-    // pathfinding hot loop isn't dominated by the time check.
     self.nodes_since_time_check += 1;
     if self.nodes_since_time_check >= TIME_CHECK_NODE_STRIDE {
       self.nodes_since_time_check = 0;
@@ -118,7 +112,6 @@ impl ExplorationTracker {
     }
   }
 
-  /// Ship cells added since the previous flush. No-op if there are no new cells.
   fn flush(&mut self) {
     let Some(ref callback) = self.callback else { return };
     let new_cells = &self.explored_cells[self.last_flush_idx..];
@@ -147,20 +140,31 @@ impl ExplorationTracker {
   }
 }
 
+/// Find a path through terrain using A*-like fringe search.
+///
+/// Inputs are raw row-major Float32Array slices plus the geo-transform
+/// (NW-corner origin and pixel scale). This skips the GeoTIFF parsing that
+/// the old entry point did per call.
 #[wasm_bindgen]
 pub fn find_path_rs(
-  elevations_buffer: &[u8],
+  elevations: &[f32],
+  azimuths: &[f32],
+  gradients: &[f32],
+  runout_zones: &[f32],
+  width: u32,
+  height: u32,
+  origin_x: f64,
+  origin_y: f64,
+  pixel_scale_x: f64,
+  pixel_scale_y: f64,
   start: String,
   end: String,
   max_gradient: Option<f64>,
-  azimuths_buffer: &[u8],
   excluded_aspects: JsValue,
-  gradients_buffer: &[u8],
   aspect_gradient_threshold: Option<f64>,
   exploration_callback: Option<Function>,
   exploration_batch_size: Option<usize>,
-  runout_zones_buffer: Option<Vec<u8>>,
-) -> Result<String, JsValue> { 
+) -> Result<String, JsValue> {
   let max_gradient: f64 = max_gradient.unwrap_or(1.0);
   let excluded_aspects: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
     vec![]
@@ -168,77 +172,79 @@ pub fn find_path_rs(
     serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
   };
   let aspect_gradient_threshold: f64 = aspect_gradient_threshold.unwrap_or(0.0);
+  let _ = exploration_batch_size; // batch size is now wall-clock based; kept for API compat
 
-  let elevations_cursor: Cursor<Vec<u8>> = Cursor::new(elevations_buffer.to_vec());
-  let mut elevations_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(elevations_cursor)
-    .map_err(|e| JsValue::from_str(&format!("Failed to open elevations GeoTIFF: {:?}", e)))?;
-  let elevations: Vec<Vec<f64>> = get_raster(&mut elevations_geotiff)?;
+  let width_us: usize = width as usize;
+  let height_us: usize = height as usize;
+  let expected_len: usize = width_us * height_us;
 
-  let azimuths_cursor: Cursor<Vec<u8>> = Cursor::new(azimuths_buffer.to_vec());
-  let mut azimuths_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(azimuths_cursor)
-    .map_err(|e| JsValue::from_str(&format!("Failed to open azimuths GeoTIFF: {:?}", e)))?;
-  let azimuths: Vec<Vec<f64>> = get_raster(&mut azimuths_geotiff)?;
+  if elevations.len() != expected_len {
+    return Err(JsValue::from_str(&format!(
+      "elevations length {} != width*height {}", elevations.len(), expected_len
+    )));
+  }
+  if azimuths.len() != expected_len {
+    return Err(JsValue::from_str("azimuths length mismatch"));
+  }
+  if gradients.len() != expected_len {
+    return Err(JsValue::from_str("gradients length mismatch"));
+  }
+  let has_runout = !runout_zones.is_empty();
+  if has_runout && runout_zones.len() != expected_len {
+    return Err(JsValue::from_str("runout_zones length mismatch"));
+  }
 
-  let gradients_cursor: Cursor<Vec<u8>> = Cursor::new(gradients_buffer.to_vec());
-  let mut gradients_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(gradients_cursor)
-    .map_err(|e| JsValue::from_str(&format!("Failed to open gradients GeoTIFF: {:?}", e)))?;
-  let gradients: Vec<Vec<f64>> = get_raster(&mut gradients_geotiff)?;
-
-  // Parse runout zones if provided
-  let runout_zones: Option<Vec<Vec<f64>>> = if let Some(buffer) = runout_zones_buffer {
-    let runout_cursor: Cursor<Vec<u8>> = Cursor::new(buffer);
-    let mut runout_geotiff: GeoTiffReader<Cursor<Vec<u8>>> = GeoTiffReader::open(runout_cursor)
-      .map_err(|e| JsValue::from_str(&format!("Failed to open runout zones GeoTIFF: {:?}", e)))?;
-    Some(get_raster(&mut runout_geotiff)?)
-  } else {
-    None
+  // Geo helpers. pixel_scale_y is negative for terrain tiles (lat decreases with y).
+  let coord_to_pixel = |lon: f64, lat: f64| -> (i32, i32) {
+    let x = ((lon - origin_x) / pixel_scale_x).floor() as i32;
+    let y = ((lat - origin_y) / pixel_scale_y).floor() as i32;
+    (x, y)
+  };
+  let pixel_to_coord = |x: u32, y: u32| -> (f64, f64) {
+    let lon = origin_x + (x as f64 + 0.5) * pixel_scale_x;
+    let lat = origin_y + (y as f64 + 0.5) * pixel_scale_y;
+    (lon, lat)
   };
 
-  let start_coord: Coordinate = parse_point_to_coordinate(&start)?;
-  let end_coord: Coordinate = parse_point_to_coordinate(&end)?;
+  let (start_lon, start_lat) = parse_point_to_coordinate(&start)?;
+  let (end_lon, end_lat) = parse_point_to_coordinate(&end)?;
 
-  let (width, height) = elevations_geotiff.image_info().dimensions
-    .ok_or_else(|| JsValue::from_str("Failed to get image dimensions"))?;
-  let width: usize = width as usize;
-  let height: usize = height as usize;
-
-  let (start_x, start_y) = elevations_geotiff.coord_to_pixel(start_coord)
-    .ok_or_else(|| JsValue::from_str("Failed to convert start coord to pixel"))?;
-  let start_node: (usize, usize) = (start_x as usize, start_y as usize);
-  
-  // Validate start node is within bounds
-  if start_node.0 >= width || start_node.1 >= height {
+  let (start_x, start_y) = coord_to_pixel(start_lon, start_lat);
+  if start_x < 0 || start_y < 0 || (start_x as usize) >= width_us || (start_y as usize) >= height_us {
     return Err(JsValue::from_str(&format!(
       "Start point ({}, {}) is outside raster bounds ({}x{})",
-      start_node.0, start_node.1, width, height
+      start_x, start_y, width_us, height_us
     )));
   }
-  
-  let (end_x, end_y) = elevations_geotiff.coord_to_pixel(end_coord)
-    .ok_or_else(|| JsValue::from_str("Failed to convert end coord to pixel"))?;
-  let end_node: (usize, usize) = (end_x as usize, end_y as usize);
-  
-  // Validate end node is within bounds
-  if end_node.0 >= width || end_node.1 >= height {
+  let start_node: (usize, usize) = (start_x as usize, start_y as usize);
+
+  let (end_x, end_y) = coord_to_pixel(end_lon, end_lat);
+  if end_x < 0 || end_y < 0 || (end_x as usize) >= width_us || (end_y as usize) >= height_us {
     return Err(JsValue::from_str(&format!(
       "End point ({}, {}) is outside raster bounds ({}x{})",
-      end_node.0, end_node.1, width, height
+      end_x, end_y, width_us, height_us
     )));
   }
+  let end_node: (usize, usize) = (end_x as usize, end_y as usize);
 
-  // Create exploration tracker
-  let batch_size = exploration_batch_size.unwrap_or(500);
-  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback, &elevations_geotiff, batch_size)));
+  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(
+    exploration_callback,
+    (origin_x, origin_y),
+    (pixel_scale_x, pixel_scale_y),
+    width,
+    height,
+  )));
   let tracker_clone = tracker.clone();
 
   let heuristic = |&(x, y): &(usize, usize)| -> i32 {
     distance((x, y), end_node) as i32
   };
 
+  let idx = |x: usize, y: usize| -> usize { y * width_us + x };
+
   let successors = |&(x, y): &(usize, usize)| -> Vec<((usize, usize), i32)> {
-    // Track exploration for visualization
     tracker_clone.borrow_mut().add_node(x, y);
-    
+
     const DIRECTIONS: [(isize, isize); 8] = [
       (0, 1), (1, 0), (0, -1), (-1, 0),
       (1, 1), (1, -1), (-1, -1), (-1, 1),
@@ -246,22 +252,25 @@ pub fn find_path_rs(
 
     let mut neighbors: Vec<((usize, usize), i32)> = Vec::with_capacity(8);
     'neighbors: for &(dx, dy) in DIRECTIONS.iter() {
-      let nx: usize = ((x as isize) + dx) as usize;
-      let ny: usize = ((y as isize) + dy) as usize;
+      let nx_isize: isize = (x as isize) + dx;
+      let ny_isize: isize = (y as isize) + dy;
+      if nx_isize < 0 || ny_isize < 0 {
+        continue;
+      }
+      let nx: usize = nx_isize as usize;
+      let ny: usize = ny_isize as usize;
 
-      if nx < width && ny < height {
-        // Check if neighbor is in a runout zone
-        if let Some(ref runout) = runout_zones {
-          if runout[ny][nx] > 0.0 {
-            continue 'neighbors;
-          }
+      if nx < width_us && ny < height_us {
+        let n_idx = idx(nx, ny);
+
+        if has_runout && runout_zones[n_idx] > 0.0 {
+          continue 'neighbors;
         }
 
-        let azimuth: f64 = azimuths[ny][nx];
-        let aspect_gradient: f64 = gradients[ny][nx];
+        let azimuth: f64 = azimuths[n_idx] as f64;
+        let aspect_gradient: f64 = gradients[n_idx] as f64;
         if aspect_gradient > aspect_gradient_threshold {
           for aspect in &excluded_aspects {
-            // Use 22.5° tolerance to also exclude half of adjacent aspects
             if aspect.contains_azimuth(azimuth, Some(22.5)) {
               continue 'neighbors;
             }
@@ -269,7 +278,7 @@ pub fn find_path_rs(
         }
 
         let d: f64 = distance((x, y), (nx, ny));
-        let dz: f64 = elevations[ny][nx] - elevations[y][x];
+        let dz: f64 = (elevations[n_idx] as f64) - (elevations[idx(x, y)] as f64);
         let gradient: f64 = dz / d;
         if gradient < max_gradient {
           let cost: i32 = cost_fn(d, gradient);
@@ -285,7 +294,6 @@ pub fn find_path_rs(
   let result: Option<(Vec<(usize, usize)>, i32)> =
     fringe(&start_node, successors, heuristic, is_end_node);
 
-  // Flush any remaining exploration nodes
   tracker.borrow_mut().flush();
 
   let path_nodes: Vec<(usize, usize)> = match result {
@@ -293,20 +301,19 @@ pub fn find_path_rs(
     None => return Err(JsValue::from_str("No path found")),
   };
 
-  // Create feature collection with points
   let results: String = FeatureCollection {
     features: path_nodes
       .iter()
       .map(|(x, y)| {
-        let coordinate: Coordinate = elevations_geotiff.pixel_to_coord(*x as u32, *y as u32).unwrap();
-        let elevation: f64 = elevations[*y][*x];
-        let azimuth: f64 = azimuths[*y][*x];
+        let (lon, lat) = pixel_to_coord(*x as u32, *y as u32);
+        let elevation: f64 = elevations[idx(*x, *y)] as f64;
+        let azimuth: f64 = azimuths[idx(*x, *y)] as f64;
         let aspect: Aspect = Aspect::from_azimuth(azimuth);
         geojson::Feature {
           bbox: None,
           geometry: Some(Geometry::new(Value::Point(vec![
-            coordinate.x,
-            coordinate.y,
+            lon,
+            lat,
             elevation,
           ]))),
           id: None,

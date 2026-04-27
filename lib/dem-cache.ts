@@ -10,10 +10,12 @@
  */
 
 const DB_NAME = 'dem-cache';
-const DB_VERSION = 3;  // Bumped for new individual tile store
+// v4: azimuths store now holds raw Float32Array per band (no GeoTIFF round-trip).
+// Old v3 records have Uint8Array (GeoTIFF) buffers; we drop & recreate the store on upgrade.
+const DB_VERSION = 4;
 const STORE_NAME = 'tiles';
 const AZIMUTHS_STORE_NAME = 'azimuths';
-const INDIVIDUAL_TILES_STORE_NAME = 'individual_tiles';  // New store for z/x/y tiles
+const INDIVIDUAL_TILES_STORE_NAME = 'individual_tiles';  // z/x/y tiles
 
 export interface Bounds {
   north: number;
@@ -176,21 +178,14 @@ interface CachedIndividualTile {
 interface CachedAzimuths {
   key: string;
   bounds: Bounds;
+  /** Raw Float32Array per band, all keyed by row-major width*height. */
   elevations: ArrayBuffer;
   azimuths: ArrayBuffer;
   gradients: ArrayBuffer;
-  /** Combined runout zones GeoTIFF */
+  /** Combined runout zones (Float32Array, intensity 0..1+) for current aspect selection. */
   runout_zones?: ArrayBuffer;
-  /** Raw elevation data for lazy runout computation */
-  elevations_raw?: ArrayBuffer;
-  /** Raw azimuth data for lazy runout computation */
-  azimuths_raw?: ArrayBuffer;
-  /** Raw gradient data for lazy runout computation */
-  gradients_raw?: ArrayBuffer;
-  /** Raster width */
-  width?: number;
-  /** Raster height */
-  height?: number;
+  width: number;
+  height: number;
   timestamp: number;
 }
 
@@ -254,10 +249,16 @@ function openDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      // Create stores if they don't exist - this preserves existing data
+      const oldVersion = event.oldVersion;
+
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'key' });
         store.createIndex('timestamp', 'timestamp', { unique: false });
+      }
+      // v3 -> v4: azimuth records changed shape (Float32Array per band, no GeoTIFF).
+      // Drop and recreate so we don't carry stale Uint8Array data.
+      if (oldVersion < 4 && db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
+        db.deleteObjectStore(AZIMUTHS_STORE_NAME);
       }
       if (!db.objectStoreNames.contains(AZIMUTHS_STORE_NAME)) {
         const azimuthsStore = db.createObjectStore(AZIMUTHS_STORE_NAME, { keyPath: 'key' });
@@ -992,29 +993,15 @@ export async function getDEMCacheStats(): Promise<{ count: number; oldestTimesta
 // ============ AZIMUTH CACHING ============
 
 export interface AzimuthData {
-  elevations: Uint8Array;
-  azimuths: Uint8Array;
-  gradients: Uint8Array;
-  /** Combined runout zones GeoTIFF for current aspect selection */
-  runout_zones?: Uint8Array;
-  /** 
-   * Raw elevation data as Float32Array for lazy runout computation.
-   */
-  elevations_raw?: Float32Array;
-  /** 
-   * Raw azimuth data as Float32Array for lazy runout computation.
-   */
-  azimuths_raw?: Float32Array;
-  /** 
-   * Raw gradient data as Float32Array for lazy runout computation.
-   */
-  gradients_raw?: Float32Array;
-  /** Raster width (needed for lazy runout computation) */
-  width?: number;
-  /** Raster height (needed for lazy runout computation) */
-  height?: number;
-  /** Bounds for GeoTIFF generation when computing runout */
-  bounds?: Bounds;
+  /** Row-major width*height f32 per band. Same shape as the WASM output. */
+  elevations: Float32Array;
+  azimuths: Float32Array;
+  gradients: Float32Array;
+  /** Combined runout intensity (0..1+) for current aspect selection. Empty/undefined = no aspects excluded. */
+  runout_zones?: Float32Array;
+  width: number;
+  height: number;
+  bounds: Bounds;
 }
 
 /**
@@ -1027,33 +1014,21 @@ export async function getCachedAzimuths(bounds: Bounds, _excludedAspects?: strin
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
     const key = azimuthCacheKey(normalizedBounds);
-    
+
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
       const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
       const request = store.get(key);
-      
+
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
         const result = request.result as CachedAzimuths | undefined;
         if (result) {
-          const elevationsRaw = result.elevations_raw ? new Float32Array(result.elevations_raw) : undefined;
-          const azimuthsRaw = result.azimuths_raw ? new Float32Array(result.azimuths_raw) : undefined;
-          const gradientsRaw = result.gradients_raw ? new Float32Array(result.gradients_raw) : undefined;
-          console.log('[Azimuth Cache] Cache HIT for:', key, {
-            hasRunoutZones: !!result.runout_zones,
-            hasRawData: !!elevationsRaw && !!azimuthsRaw && !!gradientsRaw,
-            width: result.width,
-            height: result.height,
-          });
           resolve({
-            elevations: new Uint8Array(result.elevations),
-            azimuths: new Uint8Array(result.azimuths),
-            gradients: new Uint8Array(result.gradients),
-            runout_zones: result.runout_zones ? new Uint8Array(result.runout_zones) : undefined,
-            elevations_raw: elevationsRaw,
-            azimuths_raw: azimuthsRaw,
-            gradients_raw: gradientsRaw,
+            elevations: new Float32Array(result.elevations),
+            azimuths: new Float32Array(result.azimuths),
+            gradients: new Float32Array(result.gradients),
+            runout_zones: result.runout_zones ? new Float32Array(result.runout_zones) : undefined,
             width: result.width,
             height: result.height,
             bounds: result.bounds,
@@ -1083,27 +1058,23 @@ export async function findContainingCachedAzimuths(bounds: Bounds, _excludedAspe
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
-    
+
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
       const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
       const request = store.openCursor();
-      
+
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
         const cursor = request.result;
         if (cursor) {
           const cached = cursor.value as CachedAzimuths;
           if (boundsContain(cached.bounds, normalizedBounds)) {
-            console.log('[Azimuth Cache] Found containing cached azimuths');
             resolve({
-              elevations: new Uint8Array(cached.elevations),
-              azimuths: new Uint8Array(cached.azimuths),
-              gradients: new Uint8Array(cached.gradients),
-              runout_zones: cached.runout_zones ? new Uint8Array(cached.runout_zones) : undefined,
-              elevations_raw: cached.elevations_raw ? new Float32Array(cached.elevations_raw) : undefined,
-              azimuths_raw: cached.azimuths_raw ? new Float32Array(cached.azimuths_raw) : undefined,
-              gradients_raw: cached.gradients_raw ? new Float32Array(cached.gradients_raw) : undefined,
+              elevations: new Float32Array(cached.elevations),
+              azimuths: new Float32Array(cached.azimuths),
+              gradients: new Float32Array(cached.gradients),
+              runout_zones: cached.runout_zones ? new Float32Array(cached.runout_zones) : undefined,
               width: cached.width,
               height: cached.height,
               bounds: cached.bounds,
@@ -1164,16 +1135,14 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excluded
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
     const key = azimuthCacheKey(normalizedBounds);
-    
-    // Copy arrays to avoid issues with detached buffers from worker postMessage
-    const elevationsCopy = new Uint8Array(data.elevations);
-    const azimuthsCopy = new Uint8Array(data.azimuths);
-    const gradientsCopy = new Uint8Array(data.gradients);
-    const runoutZonesCopy = data.runout_zones ? new Uint8Array(data.runout_zones) : undefined;
-    const elevationsRawCopy = data.elevations_raw ? new Float32Array(data.elevations_raw) : undefined;
-    const azimuthsRawCopy = data.azimuths_raw ? new Float32Array(data.azimuths_raw) : undefined;
-    const gradientsRawCopy = data.gradients_raw ? new Float32Array(data.gradients_raw) : undefined;
-    
+
+    // Copy arrays so we don't keep references to buffers that may be transferred
+    // out by callers later.
+    const elevationsCopy = new Float32Array(data.elevations);
+    const azimuthsCopy = new Float32Array(data.azimuths);
+    const gradientsCopy = new Float32Array(data.gradients);
+    const runoutZonesCopy = data.runout_zones ? new Float32Array(data.runout_zones) : undefined;
+
     const cached: CachedAzimuths = {
       key,
       bounds: normalizedBounds,
@@ -1181,29 +1150,18 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excluded
       azimuths: azimuthsCopy.buffer,
       gradients: gradientsCopy.buffer,
       runout_zones: runoutZonesCopy?.buffer,
-      elevations_raw: elevationsRawCopy?.buffer,
-      azimuths_raw: azimuthsRawCopy?.buffer,
-      gradients_raw: gradientsRawCopy?.buffer,
       width: data.width,
       height: data.height,
       timestamp: Date.now(),
     };
-    
+
     return new Promise((resolve, reject) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
       const request = store.put(cached);
-      
+
       request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        console.log('[Azimuth Cache] Cached azimuths for:', key, {
-          hasRunoutZones: !!runoutZonesCopy,
-          hasRawData: !!elevationsRawCopy && !!azimuthsRawCopy && !!gradientsRawCopy,
-          width: data.width,
-          height: data.height,
-        });
-        resolve();
-      };
+      request.onsuccess = () => resolve();
     });
   } catch (error) {
     console.error('[Azimuth Cache] Failed to cache azimuths:', error);
@@ -1216,26 +1174,22 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excluded
 export async function getFirstCachedAzimuths(): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
-    
+
     return new Promise((resolve) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readonly');
       const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
       const request = store.openCursor();
-      
+
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
         const cursor = request.result;
         if (cursor) {
           const cached = cursor.value as CachedAzimuths;
-          console.log('[Azimuth Cache] Found cached azimuths on startup, bounds:', cached.bounds);
           resolve({
-            elevations: new Uint8Array(cached.elevations),
-            azimuths: new Uint8Array(cached.azimuths),
-            gradients: new Uint8Array(cached.gradients),
-            runout_zones: cached.runout_zones ? new Uint8Array(cached.runout_zones) : undefined,
-            elevations_raw: cached.elevations_raw ? new Float32Array(cached.elevations_raw) : undefined,
-            azimuths_raw: cached.azimuths_raw ? new Float32Array(cached.azimuths_raw) : undefined,
-            gradients_raw: cached.gradients_raw ? new Float32Array(cached.gradients_raw) : undefined,
+            elevations: new Float32Array(cached.elevations),
+            azimuths: new Float32Array(cached.azimuths),
+            gradients: new Float32Array(cached.gradients),
+            runout_zones: cached.runout_zones ? new Float32Array(cached.runout_zones) : undefined,
             width: cached.width,
             height: cached.height,
             bounds: cached.bounds,
