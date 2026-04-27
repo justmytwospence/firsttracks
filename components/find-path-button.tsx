@@ -268,18 +268,36 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       if (!bounds || !workerRef.current) {
         return;
       }
-      
-      // Check if waypoints are within current bounds - if not, we need to expand
+
+      // Determine whether this run will pathfind only the last segment (incremental)
+      // or all segments (e.g. after a marker drag). For incremental, only the last 2
+      // waypoints need to be inside the raster — older segments' paths are already
+      // computed and preserved in `path` state, and their tiles are already in IDB.
+      // Scoping the bounds to the relevant segment keeps us under MAX_TILES even when
+      // the new waypoint is far from the existing region.
+      const addedOneWaypoint = waypoints.length === lastSuccessfulWaypointCountRef.current + 1;
+      const willOnlyDoLastSegment =
+        onlyLastSegment && addedOneWaypoint && lastSuccessfulWaypointCountRef.current > 0;
+      const relevantWaypoints = willOnlyDoLastSegment ? waypoints.slice(-2) : waypoints;
+
       let effectiveBounds = bounds;
-      const waypointBounds = waypointsToBounds(waypoints);
-      const waypointsOutsideBounds = waypointBounds && !boundsContain(bounds, waypointBounds);
-      
+      const relevantWaypointBounds = waypointsToBounds(relevantWaypoints);
+      const waypointsOutsideBounds =
+        relevantWaypointBounds && !boundsContain(bounds, relevantWaypointBounds);
+
       if (waypointsOutsideBounds) {
-        // Compute new bounds that include both current bounds and waypoints (with padding)
-        const combinedBounds = unionBounds(bounds, waypointBounds);
-        // Expand by 1.5x to give some buffer around waypoints
-        effectiveBounds = expandBounds(combinedBounds, 1.5);
-        // Invalidate cached azimuths since we're fetching new data
+        // For incremental pathfinding, focus tightly on the new segment so the
+        // resulting bounds stay well inside MAX_TILES. For a full re-pathfind,
+        // union with the existing region so all waypoints are covered.
+        const baseBounds = willOnlyDoLastSegment
+          ? relevantWaypointBounds
+          : unionBounds(bounds, relevantWaypointBounds);
+        effectiveBounds = expandBounds(baseBounds, 1.5);
+        // Defensive: if expansion couldn't grow (e.g. base was already at the tile
+        // cap), fall back to a tight box around just the segment.
+        if (!boundsContain(effectiveBounds, relevantWaypointBounds)) {
+          effectiveBounds = expandBounds(relevantWaypointBounds, 1.2);
+        }
         cachedAzimuthsRef.current = null;
       }
       
@@ -406,11 +424,9 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         // 1. onlyLastSegment prop is true (caller wants incremental)
         // 2. Waypoint count increased by exactly 1 since last successful pathfind
         // 3. We have a previous successful pathfind (lastSuccessfulWaypointCountRef > 0)
-        const addedOneWaypoint = waypoints.length === lastSuccessfulWaypointCountRef.current + 1;
-        const effectiveOnlyLastSegment = onlyLastSegment && addedOneWaypoint && lastSuccessfulWaypointCountRef.current > 0;
-        
-        const startSegment = effectiveOnlyLastSegment ? waypoints.length - 2 : 0;
-        let pathSegmentCounter = effectiveOnlyLastSegment ? 1 : 0; // Start at 1 to append if effectiveOnlyLastSegment
+        // Already computed at the top of handleClick as willOnlyDoLastSegment.
+        const startSegment = willOnlyDoLastSegment ? waypoints.length - 2 : 0;
+        let pathSegmentCounter = willOnlyDoLastSegment ? 1 : 0; // Start at 1 to append
         
         try {
           for (let i = startSegment; i < waypoints.length - 1; i++) {

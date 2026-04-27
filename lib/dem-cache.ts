@@ -791,18 +791,18 @@ export function expandBounds(bounds: Bounds, factor: number): Bounds {
   const height = bounds.north - bounds.south;
   const centerLon = (bounds.east + bounds.west) / 2;
   const centerLat = (bounds.north + bounds.south) / 2;
-  
-  // Calculate current tile count
+
+  // Cap at MAX_TILES, but never below 1.0 — shrinking the input here drops
+  // whichever waypoint sits on the far edge, which the caller never wants.
+  // If the input itself already exceeds MAX_TILES, return it as-is and let
+  // the tile fetcher decide how to handle it.
   const currentTiles = countTilesForBounds(bounds, TERRAIN_TILE_ZOOM);
-  
-  // If expansion would exceed MAX_TILES, reduce the factor
-  // Area scales with factor^2, so max factor = sqrt(MAX_TILES / currentTiles)
   const maxFactor = Math.sqrt(MAX_TILES / currentTiles);
-  const cappedFactor = Math.min(factor, maxFactor);
-  
+  const cappedFactor = Math.max(1, Math.min(factor, maxFactor));
+
   const newWidth = width * cappedFactor;
   const newHeight = height * cappedFactor;
-  
+
   return {
     north: centerLat + newHeight / 2,
     south: centerLat - newHeight / 2,
