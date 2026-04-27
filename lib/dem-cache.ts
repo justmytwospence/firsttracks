@@ -231,18 +231,27 @@ function normalizeBounds(bounds: Bounds): Bounds {
 }
 
 /**
- * Open IndexedDB for DEM caching
+ * Open IndexedDB for DEM caching.
+ * Memoized: subsequent calls return the same connection promise.
  */
+let dbPromise: Promise<IDBDatabase> | null = null;
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    
-    request.onerror = () => reject(request.error);
+
+    request.onerror = () => {
+      dbPromise = null;
+      reject(request.error);
+    };
     request.onsuccess = () => {
       const db = request.result;
+      // Reset the cached promise if the connection closes (e.g. from a version change in another tab)
+      db.onclose = () => { dbPromise = null; };
+      db.onversionchange = () => { db.close(); dbPromise = null; };
       resolve(db);
     };
-    
+
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
       // Create stores if they don't exist - this preserves existing data
@@ -260,6 +269,7 @@ function openDB(): Promise<IDBDatabase> {
       }
     };
   });
+  return dbPromise;
 }
 
 /**
@@ -331,7 +341,10 @@ async function cacheTile(grid: ElevationGrid): Promise<void> {
 async function fetchTerrainTile(x: number, y: number, zoom: number): Promise<Float32Array> {
   const url = `${TERRAIN_TILE_URL}/${zoom}/${x}/${y}.png`;
   
-  const response = await fetch(url);
+  // AWS terrain tiles return no Cache-Control header (only Last-Modified from 2017).
+  // 'force-cache' lets the browser serve any HTTP-cached copy without revalidation;
+  // safe because terrain tiles are immutable.
+  const response = await fetch(url, { cache: 'force-cache' });
   if (!response.ok) {
     throw new Error(`Failed to fetch terrain tile ${zoom}/${x}/${y}: ${response.status}`);
   }
@@ -491,39 +504,51 @@ async function fetchTileWithCache(x: number, y: number, zoom: number): Promise<F
 export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
   try {
     const db = await openDB();
-    
+
     return new Promise((resolve) => {
       const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readonly');
       const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
-      const request = store.getAll();
-      
+      // Key-only iteration: avoids rehydrating every cached tile's Float32Array
+      // (~256 KB each) just to read z/x/y. Keys are the format "z/x/y".
+      const request = store.getAllKeys();
+
       request.onerror = () => resolve(null);
       request.onsuccess = () => {
-        const tiles = request.result as CachedIndividualTile[];
-        if (tiles.length === 0) {
+        const keys = request.result as IDBValidKey[];
+        if (keys.length === 0) {
           resolve(null);
           return;
         }
-        
-        // Calculate union bounds from all tiles
+
         let minX = Number.POSITIVE_INFINITY;
         let maxX = Number.NEGATIVE_INFINITY;
         let minY = Number.POSITIVE_INFINITY;
         let maxY = Number.NEGATIVE_INFINITY;
         let zoom = TERRAIN_TILE_ZOOM;
-        
-        for (const tile of tiles) {
-          minX = Math.min(minX, tile.x);
-          maxX = Math.max(maxX, tile.x);
-          minY = Math.min(minY, tile.y);
-          maxY = Math.max(maxY, tile.y);
-          zoom = tile.z;  // Assume all tiles are same zoom
+
+        for (const k of keys) {
+          if (typeof k !== 'string') continue;
+          const parts = k.split('/');
+          if (parts.length !== 3) continue;
+          const z = Number(parts[0]);
+          const x = Number(parts[1]);
+          const y = Number(parts[2]);
+          if (!Number.isFinite(z) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          zoom = z;
         }
-        
-        // Convert tile coords to bounds
+
+        if (!Number.isFinite(minX)) {
+          resolve(null);
+          return;
+        }
+
         const nwCorner = tileToLatLng(minX, minY, zoom);
         const seCorner = tileToLatLng(maxX + 1, maxY + 1, zoom);
-        
+
         resolve({
           north: nwCorner.lat,
           south: seCorner.lat,

@@ -1,4 +1,19 @@
 {
   "installCommand": "npm install -g npm@10 && npm install && curl https://sh.rustup.rs -sSf | sh -s -- -y && PATH=$HOME/.cargo/bin:$PATH rustup target add wasm32-unknown-unknown && PATH=$HOME/.cargo/bin:$PATH cargo install wasm-pack",
-  "buildCommand": "PATH=$HOME/.cargo/bin:$PATH npm run build"
+  "buildCommand": "PATH=$HOME/.cargo/bin:$PATH npm run build",
+  "headers": [
+    {
+      "source": "/_next/static/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/(.*)\\.wasm",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" },
+        { "key": "Content-Type", "value": "application/wasm" }
+      ]
+    }
+  ]
 }

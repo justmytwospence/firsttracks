@@ -132,15 +132,18 @@ class PathfinderService {
       // Notify that azimuth computation is starting
       onProgress?.('azimuths');
 
-      worker.postMessage({
-        type: 'compute_azimuths_from_array',
-        id,
-        elevations: demGrid.data,
-        width: demGrid.width,
-        height: demGrid.height,
-        bounds: demGrid.bounds,
-        excludedAspects,
-      } as ComputeAzimuthsFromArrayRequest);
+      worker.postMessage(
+        {
+          type: 'compute_azimuths_from_array',
+          id,
+          elevations: demGrid.data,
+          width: demGrid.width,
+          height: demGrid.height,
+          bounds: demGrid.bounds,
+          excludedAspects,
+        } as ComputeAzimuthsFromArrayRequest,
+        [demGrid.data.buffer as ArrayBuffer]
+      );
     });
   }
 
@@ -186,6 +189,8 @@ class PathfinderService {
 
       worker.addEventListener('message', handler);
 
+      // NOTE: do NOT transfer these buffers. The caller (page.tsx) reuses the
+      // same Float32Arrays across repeated aspect toggles via currentAzimuthDataRef.
       worker.postMessage({
         type: 'compute_runout',
         id,

@@ -20,7 +20,7 @@ import {
   Tooltip,
 } from "chart.js";
 import type { LineString } from "geojson";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Line } from "react-chartjs-2";
 
 ChartJS.register(
@@ -96,16 +96,36 @@ export default function ElevationChart({
     };
   }, []);
 
-  // Compute values immediately
-  const computedDistances = computeDistanceMiles(polyline.coordinates);
-  const computedGradients = computeGradient(polyline.coordinates);
-  const elevation = polyline.coordinates.map((point) => point[2] * 3.28084);
-  const elevationMin = Math.min(...elevation);
-  const elevationMax = Math.max(...elevation);
-  const elevationPadding = (elevationMax - elevationMin) * 0.1;
-  const gradientMin = Math.min(...computedGradients);
-  const gradientMax = Math.max(...computedGradients);
-  const gradientPadding = (gradientMax - gradientMin) * 0.05;
+  const {
+    computedDistances,
+    computedGradients,
+    elevation,
+    elevationMin,
+    elevationMax,
+    elevationPadding,
+    gradientMin,
+    gradientMax,
+    gradientPadding,
+  } = useMemo(() => {
+    const distances = computeDistanceMiles(polyline.coordinates);
+    const gradients = computeGradient(polyline.coordinates);
+    const ele = polyline.coordinates.map((point) => point[2] * 3.28084);
+    const eleMin = Math.min(...ele);
+    const eleMax = Math.max(...ele);
+    const grMin = Math.min(...gradients);
+    const grMax = Math.max(...gradients);
+    return {
+      computedDistances: distances,
+      computedGradients: gradients,
+      elevation: ele,
+      elevationMin: eleMin,
+      elevationMax: eleMax,
+      elevationPadding: (eleMax - eleMin) * 0.1,
+      gradientMin: grMin,
+      gradientMax: grMax,
+      gradientPadding: (grMax - grMin) * 0.05,
+    };
+  }, [polyline.coordinates]);
 
   // Plugin to draw horizontal line at hovered gradient value
   const hoverLinePlugin: Plugin<"line"> = {

@@ -34,7 +34,7 @@ import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
 import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, HelpCircle, Mountain, RotateCcw, Route, TrendingUp, Undo2, Upload, X } from "lucide-react";
 import dynamic from "next/dynamic";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SiBuymeacoffee, SiGithub } from "react-icons/si";
 import { toast } from "sonner";
 
@@ -215,58 +215,53 @@ export default function PathFinderPage() {
     }
   }, [waypoints.length, isLoading, cachedBounds]);
 
-  // Compute pathAspects from aspectRaster for imported paths (when pathAspects isn't already set)
-  useEffect(() => {
-    if (path && aspectRaster && !pathAspects) {
-      // Helper to convert azimuth value (0-360) to aspect string
-      // Must match the lowercase format expected by AspectChart
-      const azimuthToAspect = (azimuth: number): string => {
-        if (azimuth === -1 || azimuth === 255) return "flat"; // NoData values
-        if (azimuth < 22.5) return "north";
-        if (azimuth < 67.5) return "northeast";
-        if (azimuth < 112.5) return "east";
-        if (azimuth < 157.5) return "southeast";
-        if (azimuth < 202.5) return "south";
-        if (azimuth < 247.5) return "southwest";
-        if (azimuth < 292.5) return "west";
-        if (azimuth < 337.5) return "northwest";
-        return "north";
+  // Derive pathAspects from aspectRaster for imported paths (when not already set).
+  // useMemo so the heavy per-coordinate raster sampling only runs when path or raster changes.
+  const derivedPathAspects = useMemo<FeatureCollection | null>(() => {
+    if (!path || !aspectRaster) return null;
+
+    const azimuthToAspect = (azimuth: number): string => {
+      if (azimuth === -1 || azimuth === 255) return "flat";
+      if (azimuth < 22.5) return "north";
+      if (azimuth < 67.5) return "northeast";
+      if (azimuth < 112.5) return "east";
+      if (azimuth < 157.5) return "southeast";
+      if (azimuth < 202.5) return "south";
+      if (azimuth < 247.5) return "southwest";
+      if (azimuth < 292.5) return "west";
+      if (azimuth < 337.5) return "northwest";
+      return "north";
+    };
+
+    const { xmin, ymax, pixelWidth, pixelHeight, values } = aspectRaster;
+    const azimuthValues = values[0];
+
+    const features = path.coordinates.map((coord) => {
+      const [lon, lat] = coord;
+      const col = Math.floor((lon - xmin) / pixelWidth);
+      const row = Math.floor((ymax - lat) / Math.abs(pixelHeight));
+
+      let aspect = "flat";
+      if (row >= 0 && row < azimuthValues.length && col >= 0 && col < azimuthValues[0].length) {
+        aspect = azimuthToAspect(azimuthValues[row][col]);
+      }
+
+      return {
+        type: "Feature" as const,
+        properties: { aspect },
+        geometry: { type: "Point" as const, coordinates: coord },
       };
+    });
 
-      // Look up aspect for each coordinate from the raster
-      const { xmin, ymax, pixelWidth, pixelHeight, values } = aspectRaster;
-      const azimuthValues = values[0]; // First band is azimuths
-      
-      const features = path.coordinates.map((coord) => {
-        const [lon, lat] = coord;
-        
-        // Convert geographic coordinates to pixel coordinates
-        const col = Math.floor((lon - xmin) / pixelWidth);
-        const row = Math.floor((ymax - lat) / Math.abs(pixelHeight));
-        
-        // Get azimuth value from raster (with bounds checking)
-        let aspect = "flat";
-        if (row >= 0 && row < azimuthValues.length && col >= 0 && col < azimuthValues[0].length) {
-          const azimuthValue = azimuthValues[row][col];
-          aspect = azimuthToAspect(azimuthValue);
-        }
-        
-        return {
-          type: "Feature" as const,
-          properties: { aspect },
-          geometry: {
-            type: "Point" as const,
-            coordinates: coord,
-          },
-        };
-      });
+    return { type: "FeatureCollection", features };
+  }, [path, aspectRaster]);
 
-      setPathAspects({
-        type: "FeatureCollection",
-        features,
-      });
+  // Apply derivedPathAspects only if pathAspects isn't already populated by FindPathButton.
+  useEffect(() => {
+    if (derivedPathAspects && !pathAspects) {
+      setPathAspects(derivedPathAspects);
     }
-  }, [path, aspectRaster, pathAspects]);
+  }, [derivedPathAspects, pathAspects]);
 
   // Handle aspect raster updates - moved here so it can be used by preloadTerrainData
   const handleSetAspectRaster = useCallback(
@@ -419,20 +414,23 @@ export default function PathFinderPage() {
     }
   }, [excludedAspects, handleSetAspectRaster]);
 
-  // Compute runout zones when aspect selection changes (lazy computation)
+  // Compute runout zones when aspect selection changes (lazy computation).
+  // Guarded with a ref so we don't fire a worker round-trip on mount when the
+  // value matches whatever the cached azimuth bundle was already computed for.
+  const lastRunoutAspectsKeyRef = useRef<string | null>(null);
   useEffect(() => {
     async function computeRunout() {
       const data = currentAzimuthDataRef.current;
-      if (!data?.elevations_raw || !data?.azimuths_raw || !data?.gradients_raw || 
+      if (!data?.elevations_raw || !data?.azimuths_raw || !data?.gradients_raw ||
           !data.width || !data.height || !data.bounds) {
-        console.log('[Aspect Change] No raw data available for runout computation');
         return;
       }
-      
-      console.log('[Aspect Change] Computing runout lazily for aspects:', excludedAspects);
-      
+
+      const key = [...excludedAspects].sort().join(',');
+      if (lastRunoutAspectsKeyRef.current === key) return;
+      lastRunoutAspectsKeyRef.current = key;
+
       try {
-        // Use the worker to compute runout for selected aspects
         const newRunoutZones = await pathfinderService.computeRunout(
           data.elevations_raw,
           data.azimuths_raw,
@@ -442,14 +440,13 @@ export default function PathFinderPage() {
           data.bounds,
           excludedAspects
         );
-        
-        // Update the raster display with new runout zones
         handleSetAspectRaster(data.azimuths, data.gradients, newRunoutZones);
       } catch (error) {
         console.error('[Aspect Change] Failed to compute runout:', error);
+        lastRunoutAspectsKeyRef.current = null;
       }
     }
-    
+
     computeRunout();
   }, [excludedAspects, handleSetAspectRaster]);
 

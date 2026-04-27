@@ -25,7 +25,7 @@ import {
   Title,
   Tooltip,
 } from "chart.js";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Chart } from "react-chartjs-2";
 
 ChartJS.register(
@@ -102,48 +102,56 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
     };
   }, []);
 
-  // Compute gradients and get range
-  const gradients = mappables.map((mappable) => {
-    return computeGradient(mappable.polyline.coordinates);
-  });
+  const {
+    gradientMin,
+    gradientMax,
+    histogramBins,
+    histograms,
+    maxHistogramValue,
+    xAxisRange,
+    cdfs,
+  } = useMemo(() => {
+    const grads = mappables.map((m) => computeGradient(m.polyline.coordinates));
+    const all = grads.flat();
+    const grMin = Math.min(...all);
+    const grMax = Math.max(...all);
 
-  const allGradients = gradients.flat();
-  const gradientMin = Math.min(...allGradients);
-  const gradientMax = Math.max(...allGradients);
-  
-  // Use coarser bins for histogram (1% increments instead of 0.1%)
-  const histogramBinSize = 0.01;
-  const histogramBins = Array.from(
-    { length: Math.ceil((gradientMax - gradientMin) / histogramBinSize) + 1 },
-    (_, i) => Number.parseFloat((gradientMin + i * histogramBinSize).toFixed(3))
-  );
-  
-  // Compute histogram counts for each bin
-  const computeHistogram = (grads: number[], bins: number[]): number[] => {
-    const counts = new Array(bins.length).fill(0);
-    for (const g of grads) {
-      const binIndex = Math.min(
-        Math.floor((g - gradientMin) / histogramBinSize),
-        bins.length - 1
-      );
-      if (binIndex >= 0) counts[binIndex]++;
-    }
-    // Normalize to density (proportion)
-    const total = grads.length;
-    return counts.map(c => c / total);
-  };
-  
-  const histograms = gradients.map(g => computeHistogram(g, histogramBins));
-  const maxHistogramValue = Math.max(...histograms.flat());
-  
-  // Fine-grained x-axis for CDF
-  const xAxisRange = Array.from(
-    { length: Math.round((gradientMax - gradientMin) / 0.001) + 1 },
-    (_, i) => Number.parseFloat((gradientMin + i * 0.001).toFixed(3))
-  );
+    const histogramBinSize = 0.01;
+    const bins = Array.from(
+      { length: Math.ceil((grMax - grMin) / histogramBinSize) + 1 },
+      (_, i) => Number.parseFloat((grMin + i * histogramBinSize).toFixed(3))
+    );
 
-  // Compute CDFs
-  const cdfs = gradients.map((g) => computeCdf(g, xAxisRange));
+    const computeHistogram = (g: number[]): number[] => {
+      const counts = new Array(bins.length).fill(0);
+      for (const v of g) {
+        const idx = Math.min(Math.floor((v - grMin) / histogramBinSize), bins.length - 1);
+        if (idx >= 0) counts[idx]++;
+      }
+      const total = g.length;
+      return counts.map((c) => c / total);
+    };
+
+    const hists = grads.map(computeHistogram);
+    const maxHist = Math.max(...hists.flat());
+
+    const xRange = Array.from(
+      { length: Math.round((grMax - grMin) / 0.001) + 1 },
+      (_, i) => Number.parseFloat((grMin + i * 0.001).toFixed(3))
+    );
+
+    const cdfArrays = grads.map((g) => computeCdf(g, xRange));
+
+    return {
+      gradientMin: grMin,
+      gradientMax: grMax,
+      histogramBins: bins,
+      histograms: hists,
+      maxHistogramValue: maxHist,
+      xAxisRange: xRange,
+      cdfs: cdfArrays,
+    };
+  }, [mappables]);
 
   // Create datasets: histogram bars first (behind), then CDF lines
   const histogramDatasets = mappables.map((mappable, i) => ({

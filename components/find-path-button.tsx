@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
+import { pathfinderService } from "@/lib/pathfinder-service";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
@@ -240,18 +241,19 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       }
     }, [excludedAspects]);
     
-    // Initialize worker
+    // Use the shared worker from pathfinderService so we don't load a second WASM heap.
     useEffect(() => {
-      const worker = new Worker(
-        new URL("../workers/pathfinder.worker.ts", import.meta.url),
-        { type: "module" }
-      );
-      
-      workerRef.current = worker;
-      setWorkerReady(true);
-      
+      let cancelled = false;
+      pathfinderService.init().then(() => {
+        if (cancelled) return;
+        workerRef.current = pathfinderService.getWorker();
+        setWorkerReady(true);
+      }).catch((err) => {
+        console.error('[FindPathButton] Failed to init shared worker:', err);
+      });
       return () => {
-        worker.terminate();
+        cancelled = true;
+        // Don't terminate — the worker is shared and owned by pathfinderService.
         workerRef.current = null;
       };
     }, []);
@@ -422,19 +424,33 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             };
             
             worker.addEventListener("message", handler);
+            // Construct fresh buffers per segment so they can be transferred without
+            // detaching azimuthData (which is reused for subsequent segments).
+            const elevationsBuffer = new Uint8Array(azimuthData.elevations);
+            const azimuthsBuffer = new Uint8Array(azimuthData.azimuths);
+            const gradientsBuffer = new Uint8Array(azimuthData.gradients);
+            const runoutZonesBuffer = avoidRunoutZones && azimuthData.runout_zones
+              ? new Uint8Array(azimuthData.runout_zones)
+              : undefined;
+            const transferList: ArrayBuffer[] = [
+              elevationsBuffer.buffer as ArrayBuffer,
+              azimuthsBuffer.buffer as ArrayBuffer,
+              gradientsBuffer.buffer as ArrayBuffer,
+            ];
+            if (runoutZonesBuffer) transferList.push(runoutZonesBuffer.buffer as ArrayBuffer);
             worker.postMessage({
               type: "find_path",
               id,
-              elevationsBuffer: new Uint8Array(azimuthData.elevations),
+              elevationsBuffer,
               start: waypoints[i].coordinates as [number, number],
               end: waypoints[i + 1].coordinates as [number, number],
               maxGradient,
-              azimuthsBuffer: new Uint8Array(azimuthData.azimuths),
+              azimuthsBuffer,
               excludedAspects,
-              gradientsBuffer: new Uint8Array(azimuthData.gradients),
+              gradientsBuffer,
               aspectGradientThreshold: 0.05,
-              runoutZonesBuffer: avoidRunoutZones && azimuthData.runout_zones ? new Uint8Array(azimuthData.runout_zones) : undefined,
-            } as WorkerRequest);
+              runoutZonesBuffer,
+            } as WorkerRequest, transferList);
           });
           
           try {
