@@ -171,17 +171,33 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     const startGeoJson = JSON.stringify({ type: 'Point', coordinates: start });
     const endGeoJson = JSON.stringify({ type: 'Point', coordinates: end });
 
-    const explorationCallback = (data: RawExplorationData) => {
+    // Two-phase callback: Rust sends "init" once with origin/scale/dims,
+    // then "cells" messages per batch. Cache the constants and forward in
+    // the original ExplorationUpdate shape so the leaflet overlay is unchanged.
+    let cached: Omit<RawExplorationData, 'cells'> | null = null;
+    const explorationCallback = (data: { type?: string; cells?: Uint16Array } & Partial<RawExplorationData>) => {
+      if (data.type === 'init') {
+        cached = {
+          originX: data.originX as number,
+          originY: data.originY as number,
+          scaleX: data.scaleX as number,
+          scaleY: data.scaleY as number,
+          width: data.width as number,
+          height: data.height as number,
+        };
+        return;
+      }
+      if (!cached || !data.cells) return;
       self.postMessage({
         type: 'exploration',
         id,
         cells: data.cells,
-        originX: data.originX,
-        originY: data.originY,
-        scaleX: data.scaleX,
-        scaleY: data.scaleY,
-        width: data.width,
-        height: data.height,
+        originX: cached.originX,
+        originY: cached.originY,
+        scaleX: cached.scaleX,
+        scaleY: cached.scaleY,
+        width: cached.width,
+        height: cached.height,
       } satisfies ExplorationUpdate);
     };
 
@@ -245,8 +261,16 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
 
     await ensureWasmInit();
 
+    // Convert geographic bounds (degrees) to meters per pixel at the raster
+    // centre so Sobel normalization is correct away from the equator.
+    // 111320 m/deg longitude at the equator (scaled by cos(lat)); 110540 m/deg latitude.
+    const centreLat = (bounds.north + bounds.south) / 2;
+    const cosLat = Math.cos((centreLat * Math.PI) / 180);
+    const pxXMeters = ((bounds.east - bounds.west) / width) * cosLat * 111320;
+    const pxYMeters = ((bounds.north - bounds.south) / height) * 110540;
+
     // Runout is computed lazily on aspect change. Pass an empty array here.
-    const arrayResult = compute_azimuths_from_array(elevations, width, height, []);
+    const arrayResult = compute_azimuths_from_array(elevations, width, height, [], pxXMeters, pxYMeters);
 
     const resultElevations = arrayResult.get_elevations();
     const resultAzimuths = arrayResult.get_azimuths();
