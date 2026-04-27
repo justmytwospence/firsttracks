@@ -6,10 +6,13 @@ mod find_path;
 mod geotiff;
 mod raster;
 
-pub use azimuth::{compute_azimuths, compute_azimuths_from_array, Aspect, AzimuthResult, AzimuthArrayResult};
+pub use azimuth::{
+  compute_azimuths, compute_azimuths_from_array, compute_runout_for_aspects,
+  Aspect, AzimuthArrayResult, AzimuthResult,
+};
 pub use find_path::find_path_rs;
-pub use geotiff::{serialize_to_geotiff, array_to_geotiff};
-pub use raster::get_raster;
+pub use geotiff::{array_to_geotiff, serialize_to_geotiff_flat};
+pub use raster::get_raster_flat;
 
 // Initialize panic hook for better error messages in browser console
 #[wasm_bindgen]

@@ -5,8 +5,40 @@ use std::{f64::consts::PI, io::Cursor};
 use wasm_bindgen::prelude::*;
 
 use crate::console_log::console_log;
+use crate::geotiff::serialize_to_geotiff_flat;
+use crate::raster::get_raster_flat;
 
-use crate::{get_raster, serialize_to_geotiff};
+/// Sentinel value for "flat" azimuth (no defined slope direction).
+const AZIMUTH_FLAT: f32 = -1.0;
+
+/// Approximate meters per degree of latitude (good to 0.5% across the globe).
+const METERS_PER_DEG_LAT: f64 = 110540.0;
+/// Meters per degree of longitude at the equator. Multiply by cos(lat) at other latitudes.
+const METERS_PER_DEG_LON_EQUATOR: f64 = 111320.0;
+
+/// Sobel response for a uniformly tilted plane: response = SOBEL_NORMALIZER * slope * pixel_size.
+/// Derived from sum_ij(k_ij * (j-2)) for the gx kernel: 28 + 52 + 80 + 52 + 28 = 240.
+const SOBEL_NORMALIZER: f64 = 240.0;
+
+/// 5x5 Sobel kernel for x-derivative (column gradient). Flat row-major.
+#[rustfmt::skip]
+const GX_KERNEL: [f64; 25] = [
+  -5.0,  -4.0,  0.0,  4.0,  5.0,
+  -8.0, -10.0,  0.0, 10.0,  8.0,
+ -10.0, -20.0,  0.0, 20.0, 10.0,
+  -8.0, -10.0,  0.0, 10.0,  8.0,
+  -5.0,  -4.0,  0.0,  4.0,  5.0,
+];
+
+/// 5x5 Sobel kernel for y-derivative (row gradient). Flat row-major.
+#[rustfmt::skip]
+const GY_KERNEL: [f64; 25] = [
+  -5.0,  -8.0, -10.0,  -8.0, -5.0,
+  -4.0, -10.0, -20.0, -10.0, -4.0,
+   0.0,   0.0,   0.0,   0.0,  0.0,
+   4.0,  10.0,  20.0,  10.0,  4.0,
+   5.0,   8.0,  10.0,   8.0,  5.0,
+];
 
 #[wasm_bindgen]
 pub struct AzimuthResult {
@@ -19,35 +51,20 @@ pub struct AzimuthResult {
 #[wasm_bindgen]
 impl AzimuthResult {
   #[wasm_bindgen(getter)]
-  pub fn elevations(&self) -> Vec<u8> {
-    self.elevations.clone()
-  }
-
+  pub fn elevations(&self) -> Vec<u8> { self.elevations.clone() }
   #[wasm_bindgen(getter)]
-  pub fn azimuths(&self) -> Vec<u8> {
-    self.azimuths.clone()
-  }
-
+  pub fn azimuths(&self) -> Vec<u8> { self.azimuths.clone() }
   #[wasm_bindgen(getter)]
-  pub fn gradients(&self) -> Vec<u8> {
-    self.gradients.clone()
-  }
-
+  pub fn gradients(&self) -> Vec<u8> { self.gradients.clone() }
   #[wasm_bindgen(getter)]
-  pub fn runout_zones(&self) -> Vec<u8> {
-    self.runout_zones.clone()
-  }
+  pub fn runout_zones(&self) -> Vec<u8> { self.runout_zones.clone() }
 }
 
-/// Result struct for array-based azimuth computation (without GeoTIFF serialization)
-/// Now includes 8 separate runout channels (one per aspect) for pre-computed runout zones
 #[wasm_bindgen]
 pub struct AzimuthArrayResult {
   elevations: Vec<f32>,
   azimuths: Vec<f32>,
   gradients: Vec<f32>,
-  /// 8 runout channels packed sequentially: [N, NE, E, SE, S, SW, W, NW]
-  /// Each channel is width*height f32 values, total size = 8 * width * height
   runout_zones: Vec<f32>,
   width: u32,
   height: u32,
@@ -55,69 +72,29 @@ pub struct AzimuthArrayResult {
 
 #[wasm_bindgen]
 impl AzimuthArrayResult {
-  /// Get elevations as Float32Array (copies data to JS heap).
-  /// For large grids, this is more efficient than returning Vec<f32>.
   #[wasm_bindgen]
-  pub fn get_elevations(&self) -> Float32Array {
-    Float32Array::from(&self.elevations[..])
-  }
-
-  /// Get azimuths as Float32Array (copies data to JS heap).
+  pub fn get_elevations(&self) -> Float32Array { Float32Array::from(&self.elevations[..]) }
   #[wasm_bindgen]
-  pub fn get_azimuths(&self) -> Float32Array {
-    Float32Array::from(&self.azimuths[..])
-  }
-
-  /// Get gradients as Float32Array (copies data to JS heap).
+  pub fn get_azimuths(&self) -> Float32Array { Float32Array::from(&self.azimuths[..]) }
   #[wasm_bindgen]
-  pub fn get_gradients(&self) -> Float32Array {
-    Float32Array::from(&self.gradients[..])
-  }
-
-  /// Get runout zones as Float32Array (copies data to JS heap).
-  /// This is 8 channels packed sequentially, each width*height elements.
+  pub fn get_gradients(&self) -> Float32Array { Float32Array::from(&self.gradients[..]) }
   #[wasm_bindgen]
-  pub fn get_runout_zones(&self) -> Float32Array {
-    Float32Array::from(&self.runout_zones[..])
-  }
-
+  pub fn get_runout_zones(&self) -> Float32Array { Float32Array::from(&self.runout_zones[..]) }
   #[wasm_bindgen(getter)]
-  pub fn width(&self) -> u32 {
-    self.width
-  }
-
+  pub fn width(&self) -> u32 { self.width }
   #[wasm_bindgen(getter)]
-  pub fn height(&self) -> u32 {
-    self.height
-  }
-
-  /// Consume the result and return elevations, transferring ownership.
+  pub fn height(&self) -> u32 { self.height }
   #[wasm_bindgen]
-  pub fn into_elevations(self) -> Vec<f32> {
-    self.elevations
-  }
-
-  /// Consume the result and return azimuths, transferring ownership.
+  pub fn into_elevations(self) -> Vec<f32> { self.elevations }
   #[wasm_bindgen]
-  pub fn into_azimuths(self) -> Vec<f32> {
-    self.azimuths
-  }
-
-  /// Consume the result and return gradients, transferring ownership.
+  pub fn into_azimuths(self) -> Vec<f32> { self.azimuths }
   #[wasm_bindgen]
-  pub fn into_gradients(self) -> Vec<f32> {
-    self.gradients
-  }
-
-  /// Consume the result and return runout zones, transferring ownership.
+  pub fn into_gradients(self) -> Vec<f32> { self.gradients }
   #[wasm_bindgen]
-  pub fn into_runout_zones(self) -> Vec<f32> {
-    self.runout_zones
-  }
+  pub fn into_runout_zones(self) -> Vec<f32> { self.runout_zones }
 }
 
-
-#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Aspect {
   North,
@@ -133,29 +110,33 @@ pub enum Aspect {
 
 impl Aspect {
   pub fn from_azimuth(azimuth: f64) -> Aspect {
-    if azimuth == -1.0 {
-      Aspect::Flat
+    if azimuth < 0.0 {
+      return Aspect::Flat;
+    }
+    let normalized = azimuth.rem_euclid(360.0);
+    if normalized < 22.5 || normalized >= 337.5 {
+      Aspect::North
+    } else if normalized < 67.5 {
+      Aspect::Northeast
+    } else if normalized < 112.5 {
+      Aspect::East
+    } else if normalized < 157.5 {
+      Aspect::Southeast
+    } else if normalized < 202.5 {
+      Aspect::South
+    } else if normalized < 247.5 {
+      Aspect::Southwest
+    } else if normalized < 292.5 {
+      Aspect::West
     } else {
-      match azimuth as f64 {
-        a if a < 22.5 => Aspect::North,
-        a if a < 67.5 => Aspect::Northeast,
-        a if a < 112.5 => Aspect::East,
-        a if a < 157.5 => Aspect::Southeast,
-        a if a < 202.5 => Aspect::South,
-        a if a < 247.5 => Aspect::Southwest,
-        a if a < 292.5 => Aspect::West,
-        a if a < 337.5 => Aspect::Northwest,
-        _ => Aspect::North,
-      }
+      Aspect::Northwest
     }
   }
 
   pub fn contains_azimuth(&self, azimuth: f64, tolerance: Option<f64>) -> bool {
-    // Handle NaN and invalid values
     if azimuth.is_nan() || azimuth < -1.5 || azimuth > 360.0 {
       return false;
     }
-    
     let tolerance: f64 = tolerance.unwrap_or(0.0);
     match self {
       Aspect::Northeast => (22.5 - tolerance) <= azimuth && azimuth <= (67.5 + tolerance),
@@ -166,89 +147,161 @@ impl Aspect {
       Aspect::West => (247.5 - tolerance) <= azimuth && azimuth <= (292.5 + tolerance),
       Aspect::Northwest => (292.5 - tolerance) <= azimuth && azimuth <= (337.5 + tolerance),
       Aspect::North => {
-        (0.0 - tolerance) <= azimuth && azimuth <= (22.5 + tolerance)
-          || (337.5 - tolerance) <= azimuth && azimuth <= 360.0
+        (azimuth >= 0.0 && azimuth <= 22.5 + tolerance)
+          || (azimuth >= 337.5 - tolerance && azimuth <= 360.0)
       }
-      Aspect::Flat => azimuth == -1.0,
+      Aspect::Flat => azimuth < 0.0,
+    }
+  }
+
+  /// 0..=7 for the eight named directions, matching the D8 encoding.
+  fn cardinal_index(&self) -> Option<u8> {
+    match self {
+      Aspect::North => Some(0),
+      Aspect::Northeast => Some(1),
+      Aspect::East => Some(2),
+      Aspect::Southeast => Some(3),
+      Aspect::South => Some(4),
+      Aspect::Southwest => Some(5),
+      Aspect::West => Some(6),
+      Aspect::Northwest => Some(7),
+      Aspect::Flat => None,
     }
   }
 }
 
-/// Calculate azimuth from horizontal (Gx) and vertical (Gy) gradients
+/// Build a u8 bitmask (one bit per cardinal index) from a list of excluded aspects.
+/// With `with_tolerance` true, each excluded aspect also marks its two neighbours,
+/// matching `contains_azimuth(_, Some(22.5))` semantics used by the pathfinder.
+pub fn excluded_aspect_mask(excluded: &[Aspect], with_tolerance: bool) -> u8 {
+  let mut mask: u8 = 0;
+  for a in excluded {
+    if let Some(i) = a.cardinal_index() {
+      mask |= 1 << i;
+      if with_tolerance {
+        mask |= 1 << ((i + 1) % 8);
+        mask |= 1 << ((i + 7) % 8);
+      }
+    }
+  }
+  mask
+}
+
+/// Convert a 0–360° azimuth to a cardinal index 0..=7. Returns None for flat/NaN.
+fn azimuth_to_aspect_idx(azimuth: f32) -> Option<u8> {
+  if azimuth < 0.0 || azimuth.is_nan() {
+    return None;
+  }
+  let normalized = ((azimuth as f64) + 22.5).rem_euclid(360.0);
+  Some(((normalized / 45.0) as usize % 8) as u8)
+}
+
+/// Calculate azimuth (degrees, 0..360, or -1 for flat) from horizontal (gx)
+/// and vertical (gy) Sobel responses.
 pub fn calculate_azimuth(gx: f64, gy: f64) -> f64 {
   if gx == 0.0 && gy == 0.0 {
-    return -1.0; // Default value for flat areas
+    return -1.0;
   }
-
-  // Calculate azimuth in radians, then convert to degrees
-  let azimuth_radians: f64 = ((-gx) as f64).atan2(gy as f64); // Invert gx to correct E/W mapping
-  let mut azimuth_degrees: f64 = azimuth_radians * 180.0 / PI;
-
-  // Normalize to [0, 360)
+  // Invert gx so that east-rising terrain reports a west-facing aspect (descent direction).
+  let azimuth_radians = (-gx).atan2(gy);
+  let mut azimuth_degrees = azimuth_radians * 180.0 / PI;
   if azimuth_degrees < 0.0 {
     azimuth_degrees += 360.0;
   }
-
-  azimuth_degrees as f64
+  azimuth_degrees
 }
 
-/// Compute gradient along azimuth
-fn compute_gradient_along_azimuth(gx: f64, gy: f64, azimuth: f64) -> f64 {
-  if azimuth == -1.0 {
-    return 0.0;
+/// Pixel size in meters at the given latitude, given a degrees-per-pixel scale.
+pub fn deg_pixel_to_meters(pixel_scale_deg: [f64; 2], lat_deg: f64) -> (f64, f64) {
+  let cos_lat = (lat_deg * PI / 180.0).cos().abs();
+  let px_x = pixel_scale_deg[0].abs() * cos_lat * METERS_PER_DEG_LON_EQUATOR;
+  let px_y = pixel_scale_deg[1].abs() * METERS_PER_DEG_LAT;
+  (px_x, px_y)
+}
+
+/// Apply the 5x5 Sobel kernels to a flat row-major elevation buffer.
+/// Returns `(azimuths, gradients)`, both row-major and length width*height.
+/// The 2-pixel border is initialised to (-1.0, 0.0) — i.e. Aspect::Flat with zero slope.
+pub fn compute_sobel_flat(
+  elevations: &[f32],
+  width: usize,
+  height: usize,
+  pixel_size_x_m: f64,
+  pixel_size_y_m: f64,
+) -> (Vec<f32>, Vec<f32>) {
+  let n = width * height;
+  let mut azimuths = vec![AZIMUTH_FLAT; n];
+  let mut gradients = vec![0.0f32; n];
+
+  if width < 5 || height < 5 {
+    return (azimuths, gradients);
   }
 
-  const PIXEL_SIZE: f64 = 10.0; // 10m pixel size
-  const KERNEL_SUM: f64 = 68.0; // Sum of absolute values in Sobel 5x5 kernel
+  let inv_norm_x = 1.0 / (SOBEL_NORMALIZER * pixel_size_x_m);
+  let inv_norm_y = 1.0 / (SOBEL_NORMALIZER * pixel_size_y_m);
 
-  // Normalize gradients
-  let gx_normalized: f64 = gx / (KERNEL_SUM * PIXEL_SIZE).abs();
-  let gy_normalized: f64 = gy / (KERNEL_SUM * PIXEL_SIZE).abs();
+  for i in 2..(height - 2) {
+    let row_out = i * width;
+    for j in 2..(width - 2) {
+      let mut gx = 0.0f64;
+      let mut gy = 0.0f64;
+      for ki in 0..5 {
+        let row_in = (i + ki - 2) * width;
+        let k_row = ki * 5;
+        for kj in 0..5 {
+          let pixel_value = elevations[row_in + j + kj - 2] as f64;
+          gx += pixel_value * GX_KERNEL[k_row + kj];
+          gy += pixel_value * GY_KERNEL[k_row + kj];
+        }
+      }
+      let azimuth = calculate_azimuth(gx, gy);
+      let out_idx = row_out + j;
+      azimuths[out_idx] = azimuth as f32;
+      if azimuth >= 0.0 {
+        let gx_n = gx * inv_norm_x;
+        let gy_n = gy * inv_norm_y;
+        gradients[out_idx] = ((gx_n * gx_n) + (gy_n * gy_n)).sqrt() as f32;
+      }
+    }
+  }
 
-  // Calculate slope as rise/run
-  ((gx_normalized * gx_normalized) + (gy_normalized * gy_normalized)).sqrt()
+  (azimuths, gradients)
 }
 
-/// Compute D8 flow directions for each cell.
-/// Returns a 2D array where each value encodes the direction to the steepest downhill neighbor:
-///   0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 255=flat/sink (no downhill neighbor)
-fn compute_d8_flow_directions(elevations: &Vec<Vec<f64>>) -> Vec<Vec<u8>> {
-  let height = elevations.len();
-  let width = elevations[0].len();
-  
-  let mut flow_dir: Vec<Vec<u8>> = vec![vec![255; width]; height];
-  
-  // D8 neighbor offsets: (dy, dx) for directions 0-7
-  // Direction encoding: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
-  const D8_OFFSETS: [(isize, isize); 8] = [
-    (-1, 0),  // 0: N
-    (-1, 1),  // 1: NE
-    (0, 1),   // 2: E
-    (1, 1),   // 3: SE
-    (1, 0),   // 4: S
-    (1, -1),  // 5: SW
-    (0, -1),  // 6: W
-    (-1, -1), // 7: NW
-  ];
-  
-  // Distance weights for diagonal vs cardinal (sqrt(2) vs 1)
-  const D8_WEIGHTS: [f64; 8] = [1.0, 1.414, 1.0, 1.414, 1.0, 1.414, 1.0, 1.414];
-  
+// ---------------------------------------------------------------------------
+// D8 flow direction
+// ---------------------------------------------------------------------------
+
+/// D8 neighbour offsets keyed by direction: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW.
+pub const D8_OFFSETS: [(isize, isize); 8] = [
+  (-1, 0), (-1, 1), (0, 1), (1, 1),
+  (1, 0), (1, -1), (0, -1), (-1, -1),
+];
+
+/// Distance weight: 1.0 for cardinals, sqrt(2) for diagonals.
+const D8_WEIGHTS: [f64; 8] = [
+  1.0, std::f64::consts::SQRT_2, 1.0, std::f64::consts::SQRT_2,
+  1.0, std::f64::consts::SQRT_2, 1.0, std::f64::consts::SQRT_2,
+];
+
+/// Compute D8 flow direction (steepest downhill neighbour) for each interior cell.
+/// Returns flat row-major buffer; cells with no downhill neighbour or on the
+/// border are marked with 255.
+pub fn compute_d8_flow_directions_flat(elevations: &[f32], width: usize, height: usize) -> Vec<u8> {
+  let mut flow_dir = vec![255u8; width * height];
+  if width < 3 || height < 3 {
+    return flow_dir;
+  }
   for i in 1..(height - 1) {
     for j in 1..(width - 1) {
-      let center_elev = elevations[i][j];
-      let mut steepest_slope = 0.0;
+      let center = elevations[i * width + j];
+      let mut steepest_slope = 0.0f64;
       let mut steepest_dir: u8 = 255;
-      
       for (dir, &(dy, dx)) in D8_OFFSETS.iter().enumerate() {
         let ny = (i as isize + dy) as usize;
         let nx = (j as isize + dx) as usize;
-        
-        let neighbor_elev = elevations[ny][nx];
-        let drop = center_elev - neighbor_elev;
-        
+        let drop = (center - elevations[ny * width + nx]) as f64;
         if drop > 0.0 {
-          // Slope = drop / distance (accounting for diagonal distance)
           let slope = drop / D8_WEIGHTS[dir];
           if slope > steepest_slope {
             steepest_slope = slope;
@@ -256,24 +309,129 @@ fn compute_d8_flow_directions(elevations: &Vec<Vec<f64>>) -> Vec<Vec<u8>> {
           }
         }
       }
-      
-      flow_dir[i][j] = steepest_dir;
+      flow_dir[i * width + j] = steepest_dir;
     }
   }
-  
   flow_dir
 }
 
+// ---------------------------------------------------------------------------
+// Runout propagation
+// ---------------------------------------------------------------------------
+
+/// Minimum gradient (rise/run) for a cell to be considered an avalanche source zone.
+/// 0.176 ≈ tan(10°). Now meaningful again after fixing SOBEL_NORMALIZER.
+pub const START_ZONE_THRESHOLD: f32 = 0.176;
+const MAX_RUNOUT_CELLS: usize = 50;
+const INITIAL_INTENSITY: f32 = 1.0;
+const DECAY_RATE: f32 = 0.92;
+const SPREAD_ITERATIONS: usize = 2;
+const SPREAD_DECAY: f32 = 0.7;
+const TERMINATE_BELOW: f32 = 0.05;
+/// Width of the gradient blend zone (10°-20°) where source-zone edge intensity fades in.
+const BLEND_RANGE: f32 = 0.35 - START_ZONE_THRESHOLD;
+
+/// Pre-compute aspect index per cell from a flat azimuth raster.
+fn build_aspect_indices(azimuths: &[f32]) -> Vec<Option<u8>> {
+  azimuths.iter().map(|&a| azimuth_to_aspect_idx(a)).collect()
+}
+
+/// Propagate runout intensity downhill from each excluded-aspect source cell
+/// using D8 flow, then apply lateral spreading. Operates in place on `runout`.
+fn propagate_runout(
+  runout: &mut [f32],
+  spread_buffer: &mut [f32],
+  gradients: &[f32],
+  aspect_indices: &[Option<u8>],
+  flow_dir: &[u8],
+  width: usize,
+  height: usize,
+  excluded_mask: u8,
+) {
+  let is_source = |idx: usize| -> bool {
+    gradients[idx] >= START_ZONE_THRESHOLD
+      && aspect_indices[idx].map(|a| (excluded_mask >> a) & 1 == 1).unwrap_or(false)
+  };
+
+  for i in 1..(height - 1) {
+    for j in 1..(width - 1) {
+      let flat_idx = i * width + j;
+      if !is_source(flat_idx) {
+        continue;
+      }
+
+      // Edge blending: cells just past the threshold get a low fade-in intensity
+      // so the runout overlay smoothly meets the red aspect shading.
+      let g = gradients[flat_idx];
+      let above = g - START_ZONE_THRESHOLD;
+      if above < BLEND_RANGE {
+        let blend = 1.0 - (above / BLEND_RANGE);
+        runout[flat_idx] = runout[flat_idx].max(blend * 0.5);
+      }
+
+      // Walk down the D8 flow chain, decaying intensity each step.
+      let mut current_y = i;
+      let mut current_x = j;
+      let mut cells_walked = 0usize;
+      let mut intensity = INITIAL_INTENSITY;
+
+      loop {
+        let dir = flow_dir[current_y * width + current_x];
+        if dir >= 8 {
+          break;
+        }
+        let (dy, dx) = D8_OFFSETS[dir as usize];
+        let next_y = (current_y as isize + dy) as usize;
+        let next_x = (current_x as isize + dx) as usize;
+        if next_y == 0 || next_y >= height - 1 || next_x == 0 || next_x >= width - 1 {
+          break;
+        }
+        current_y = next_y;
+        current_x = next_x;
+        cells_walked += 1;
+        intensity *= DECAY_RATE;
+
+        let next_idx = current_y * width + current_x;
+        if !is_source(next_idx) && intensity > runout[next_idx] {
+          runout[next_idx] = intensity;
+        }
+        if cells_walked >= MAX_RUNOUT_CELLS || intensity < TERMINATE_BELOW {
+          break;
+        }
+      }
+    }
+  }
+
+  // Lateral spreading: 4-connected diffusion, skipping source zones.
+  for _ in 0..SPREAD_ITERATIONS {
+    spread_buffer.copy_from_slice(runout);
+    for i in 1..(height - 1) {
+      for j in 1..(width - 1) {
+        let flat_idx = i * width + j;
+        let intensity = runout[flat_idx];
+        if intensity <= 0.0 {
+          continue;
+        }
+        let spread = intensity * SPREAD_DECAY;
+        let neighbours = [
+          (i - 1) * width + j,
+          (i + 1) * width + j,
+          i * width + (j - 1),
+          i * width + (j + 1),
+        ];
+        for &n_idx in &neighbours {
+          if !is_source(n_idx) && spread > spread_buffer[n_idx] {
+            spread_buffer[n_idx] = spread;
+          }
+        }
+      }
+    }
+    runout.copy_from_slice(spread_buffer);
+  }
+}
+
 /// Compute runout zones LAZILY for only the specified excluded aspects.
-/// This is called when aspect selection changes, instead of pre-computing all 8 channels.
-/// Returns a single combined runout intensity map (not 8 channels).
-/// 
-/// Parameters:
-/// - elevations_flat: Flat f32 array of elevation values
-/// - azimuths_flat: Flat f32 array of azimuth values (0-360 degrees)
-/// - gradients_flat: Flat f32 array of gradient values (rise/run)
-/// - width, height: Grid dimensions
-/// - excluded_aspects: JS array of aspect names to compute runout for
+/// Inputs are flat row-major f32 arrays; output is a flat f32 intensity map.
 #[wasm_bindgen]
 pub fn compute_runout_for_aspects(
   elevations_flat: &[f32],
@@ -285,583 +443,276 @@ pub fn compute_runout_for_aspects(
 ) -> Result<Float32Array, JsValue> {
   let width = width as usize;
   let height = height as usize;
-  let grid_size = width * height;
-  
-  // Parse excluded aspects
+  let n = width * height;
+
   let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
     vec![]
   } else {
     serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
   };
-  
-  // If no aspects excluded, return empty runout
+
   if excluded_aspects_vec.is_empty() {
     console_log("[WASM] No aspects excluded, returning empty runout");
-    return Ok(Float32Array::from(vec![0.0f32; grid_size].as_slice()));
+    return Ok(Float32Array::from(vec![0.0f32; n].as_slice()));
   }
-  
-  console_log(&format!("[WASM] Computing runout for {} excluded aspects on {}x{} grid", 
-    excluded_aspects_vec.len(), width, height));
-  
-  // Convert flat arrays to 2D for D8 flow computation
-  let elevations: Vec<Vec<f64>> = (0..height)
-    .map(|row| {
-      (0..width)
-        .map(|col| elevations_flat[row * width + col] as f64)
-        .collect()
-    })
-    .collect();
-  
-  // Pre-compute D8 flow directions
-  let flow_dir = compute_d8_flow_directions(&elevations);
-  
-  // Create a set of excluded aspect indices for fast lookup
-  let excluded_indices: Vec<usize> = excluded_aspects_vec.iter().filter_map(|aspect| {
-    match aspect {
-      Aspect::North => Some(0),
-      Aspect::Northeast => Some(1),
-      Aspect::East => Some(2),
-      Aspect::Southeast => Some(3),
-      Aspect::South => Some(4),
-      Aspect::Southwest => Some(5),
-      Aspect::West => Some(6),
-      Aspect::Northwest => Some(7),
-      Aspect::Flat => None,
-    }
-  }).collect();
-  
-  // Pre-compute aspect indices for all cells
-  let aspect_indices: Vec<Option<usize>> = azimuths_flat
-    .iter()
-    .map(|&azimuth| {
-      if azimuth < 0.0 || azimuth.is_nan() {
-        None
-      } else {
-        let normalized = (azimuth + 22.5) % 360.0;
-        Some((normalized / 45.0) as usize % 8)
-      }
-    })
-    .collect();
-  
-  // Single combined runout grid
-  let mut runout: Vec<f32> = vec![0.0f32; grid_size];
-  
-  // Constants
-  const START_ZONE_THRESHOLD: f32 = 0.176; // tan(10°)
-  const MAX_RUNOUT_CELLS: usize = 50;
-  const INITIAL_INTENSITY: f32 = 1.0;
-  const DECAY_RATE: f32 = 0.92;
-  
-  const D8_OFFSETS: [(isize, isize); 8] = [
-    (-1, 0),  // 0: N
-    (-1, 1),  // 1: NE
-    (0, 1),   // 2: E
-    (1, 1),   // 3: SE
-    (1, 0),   // 4: S
-    (1, -1),  // 5: SW
-    (0, -1),  // 6: W
-    (-1, -1), // 7: NW
-  ];
-  
-  let idx = |row: usize, col: usize| -> usize { row * width + col };
-  
-  // Single pass - only process source zones for excluded aspects
-  for i in 1..(height - 1) {
-    for j in 1..(width - 1) {
-      let flat_idx = idx(i, j);
-      let gradient = gradients_flat[flat_idx];
-      
-      if gradient < START_ZONE_THRESHOLD {
-        continue;
-      }
-      
-      // Check if this cell's aspect is in the excluded list
-      let aspect_idx = match aspect_indices[flat_idx] {
-        Some(idx) => idx,
-        None => continue,
-      };
-      
-      if !excluded_indices.contains(&aspect_idx) {
-        continue;
-      }
-      
-      // Mark source zone edge blending
-      let blend_range = 0.35 - START_ZONE_THRESHOLD;
-      let gradient_above_threshold = gradient - START_ZONE_THRESHOLD;
-      if gradient_above_threshold < blend_range {
-        let blend_factor = 1.0 - (gradient_above_threshold / blend_range);
-        let edge_intensity = blend_factor * 0.5;
-        runout[flat_idx] = runout[flat_idx].max(edge_intensity);
-      }
-      
-      // Propagate runout downhill
-      let mut current_y = i;
-      let mut current_x = j;
-      let mut runout_cells = 0;
-      let mut current_intensity = INITIAL_INTENSITY;
-      
-      loop {
-        let dir = flow_dir[current_y][current_x];
-        
-        if dir >= 8 {
-          break;
-        }
-        
-        let (dy, dx) = D8_OFFSETS[dir as usize];
-        let next_y = (current_y as isize + dy) as usize;
-        let next_x = (current_x as isize + dx) as usize;
-        
-        if next_y == 0 || next_y >= height - 1 || next_x == 0 || next_x >= width - 1 {
-          break;
-        }
-        
-        current_y = next_y;
-        current_x = next_x;
-        runout_cells += 1;
-        current_intensity *= DECAY_RATE;
-        
-        let next_flat_idx = idx(current_y, current_x);
-        
-        // Don't mark if this is also an excluded source zone
-        let next_gradient = gradients_flat[next_flat_idx];
-        let next_aspect = aspect_indices[next_flat_idx];
-        let next_is_source = next_gradient >= START_ZONE_THRESHOLD 
-          && next_aspect.map(|a| excluded_indices.contains(&a)).unwrap_or(false);
-        
-        if !next_is_source {
-          runout[next_flat_idx] = runout[next_flat_idx].max(current_intensity);
-        }
-        
-        if runout_cells >= MAX_RUNOUT_CELLS || current_intensity < 0.05 {
-          break;
-        }
-      }
-    }
+
+  if elevations_flat.len() != n || azimuths_flat.len() != n || gradients_flat.len() != n {
+    return Err(JsValue::from_str(&format!(
+      "Input arrays must all be {} elements; got elevations={}, azimuths={}, gradients={}",
+      n, elevations_flat.len(), azimuths_flat.len(), gradients_flat.len()
+    )));
   }
-  
-  // Lateral spreading pass
-  const SPREAD_ITERATIONS: usize = 2;
-  const SPREAD_DECAY: f32 = 0.7;
-  
-  let mut spread_buffer: Vec<f32> = vec![0.0f32; grid_size];
-  
-  for _ in 0..SPREAD_ITERATIONS {
-    spread_buffer.copy_from_slice(&runout);
-    
-    for i in 1..(height - 1) {
-      for j in 1..(width - 1) {
-        let flat_idx = idx(i, j);
-        let intensity = runout[flat_idx];
-        
-        if intensity > 0.0 {
-          let neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)];
-          
-          for &(ny, nx) in &neighbors {
-            if ny > 0 && ny < height - 1 && nx > 0 && nx < width - 1 {
-              let neighbor_flat_idx = idx(ny, nx);
-              let neighbor_gradient = gradients_flat[neighbor_flat_idx];
-              let neighbor_aspect = aspect_indices[neighbor_flat_idx];
-              let is_source = neighbor_gradient >= START_ZONE_THRESHOLD
-                && neighbor_aspect.map(|a| excluded_indices.contains(&a)).unwrap_or(false);
-              
-              if !is_source {
-                let spread_intensity = intensity * SPREAD_DECAY;
-                spread_buffer[neighbor_flat_idx] = spread_buffer[neighbor_flat_idx].max(spread_intensity);
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    runout.copy_from_slice(&spread_buffer);
-  }
-  
+
+  console_log(&format!(
+    "[WASM] Computing runout for {} excluded aspects on {}x{} grid",
+    excluded_aspects_vec.len(), width, height
+  ));
+
+  let flow_dir = compute_d8_flow_directions_flat(elevations_flat, width, height);
+  let aspect_indices = build_aspect_indices(azimuths_flat);
+  let excluded_mask = excluded_aspect_mask(&excluded_aspects_vec, true);
+
+  let mut runout = vec![0.0f32; n];
+  let mut spread_buffer = vec![0.0f32; n];
+  propagate_runout(
+    &mut runout,
+    &mut spread_buffer,
+    gradients_flat,
+    &aspect_indices,
+    &flow_dir,
+    width,
+    height,
+    excluded_mask,
+  );
+
   console_log(&format!("[WASM] Lazy runout computation complete, {} elements", runout.len()));
   Ok(Float32Array::from(runout.as_slice()))
 }
 
-/// Compute avalanche runout zones using D8 flow routing.
-/// Source zones are steep pixels (gradient >= threshold) with aspect in excluded_aspects.
-/// Returns intensity values (0.0-1.0) that fade with distance from source zones.
-/// Runout zones are the FLAT areas (<10°) below source zones where debris comes to rest.
-fn compute_runout_zones(
-  elevations: &Vec<Vec<f64>>,
-  azimuths: &Vec<Vec<f64>>,
-  gradients: &Vec<Vec<f64>>,
+/// Eager runout computation on flat buffers — used by the GeoTIFF-based
+/// `compute_azimuths` entrypoint.
+fn compute_runout_zones_flat(
+  elevations: &[f32],
+  azimuths: &[f32],
+  gradients: &[f32],
+  width: usize,
+  height: usize,
   excluded_aspects: &[Aspect],
-) -> Vec<Vec<f64>> {
-  // Minimum gradient to be considered a potential avalanche start zone (~10° slope)
-  // This matches where red aspect shading stops
-  const START_ZONE_THRESHOLD: f64 = 0.176; // tan(10°)
-  // Maximum cells to mark as runout on flat terrain
-  const MAX_RUNOUT_CELLS: usize = 50;
-  // Starting intensity for runout zones (will fade with distance)
-  const INITIAL_INTENSITY: f64 = 1.0;
-  // Decay rate per cell on flat terrain (faster decay since terrain is flat)
-  const DECAY_RATE: f64 = 0.92;
-
-  let height = elevations.len();
-  let width = elevations[0].len();
-  
-  let mut runout: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
-  
-  // If no aspects are excluded, no runout zones to compute
+) -> Vec<f32> {
+  let n = width * height;
+  let mut runout = vec![0.0f32; n];
   if excluded_aspects.is_empty() {
     return runout;
   }
-  
-  // Compute D8 flow directions
-  let flow_dir = compute_d8_flow_directions(elevations);
-  
-  // D8 neighbor offsets matching direction encoding
-  const D8_OFFSETS: [(isize, isize); 8] = [
-    (-1, 0),  // 0: N
-    (-1, 1),  // 1: NE
-    (0, 1),   // 2: E
-    (1, 1),   // 3: SE
-    (1, 0),   // 4: S
-    (1, -1),  // 5: SW
-    (0, -1),  // 6: W
-    (-1, -1), // 7: NW
-  ];
-  
-  // Find all source zone cells and propagate runout from each
-  // Also mark source zone cells with low-intensity runout to blend with red shading
-  for i in 1..(height - 1) {
-    for j in 1..(width - 1) {
-      let gradient = gradients[i][j];
-      let azimuth = azimuths[i][j];
-      
-      // Must be steep enough to be an avalanche start zone
-      if gradient < START_ZONE_THRESHOLD {
-        continue;
-      }
-      
-      // Check if this pixel's aspect is in the excluded list
-      let mut is_excluded = false;
-      for aspect in excluded_aspects {
-        if aspect.contains_azimuth(azimuth, Some(22.5)) {
-          is_excluded = true;
-          break;
-        }
-      }
-      
-      if !is_excluded {
-        continue;
-      }
-      
-      // Mark source zone cells near the 10° threshold with fading runout
-      // to create a smooth blend between red aspect shading and amber runout
-      // The closer to 10° threshold, the more runout blending we apply
-      let blend_range = 0.35 - START_ZONE_THRESHOLD; // ~10° to ~20° range for blending
-      let gradient_above_threshold = gradient - START_ZONE_THRESHOLD;
-      if gradient_above_threshold < blend_range {
-        let blend_factor = 1.0 - (gradient_above_threshold / blend_range);
-        let edge_intensity = blend_factor * 0.5; // Max 50% intensity at the 10° edge
-        runout[i][j] = runout[i][j].max(edge_intensity);
-      }
-      
-      // This is a source zone - follow D8 flow and mark runout with fading intensity
-      let mut current_y = i;
-      let mut current_x = j;
-      let mut runout_cells = 0;
-      let mut current_intensity = INITIAL_INTENSITY;
-      
-      // Follow flow and mark runout starting from first cell after source
-      loop {
-        let dir = flow_dir[current_y][current_x];
-        
-        // Stop if this is a sink (no downhill flow) or invalid direction
-        if dir >= 8 {
-          break;
-        }
-        
-        // Move to next cell following flow direction
-        let (dy, dx) = D8_OFFSETS[dir as usize];
-        let next_y = (current_y as isize + dy) as usize;
-        let next_x = (current_x as isize + dx) as usize;
-        
-        // Bounds check
-        if next_y == 0 || next_y >= height - 1 || next_x == 0 || next_x >= width - 1 {
-          break;
-        }
-        
-        current_y = next_y;
-        current_x = next_x;
-        runout_cells += 1;
-        
-        // Decay intensity with distance
-        current_intensity *= DECAY_RATE;
-        
-        // Don't mark cells that are themselves steep excluded-aspect source zones (they show as red)
-        let next_gradient = gradients[current_y][current_x];
-        let next_azimuth = azimuths[current_y][current_x];
-        let mut next_is_source = false;
-        if next_gradient >= START_ZONE_THRESHOLD {
-          for aspect in excluded_aspects {
-            if aspect.contains_azimuth(next_azimuth, Some(22.5)) {
-              next_is_source = true;
-              break;
-            }
-          }
-        }
-        
-        // Only mark as runout if it's not a source zone itself (source zones show as red)
-        // Use max to accumulate intensity from multiple flow paths
-        if !next_is_source {
-          runout[current_y][current_x] = runout[current_y][current_x].max(current_intensity);
-        }
-        
-        // Stop conditions:
-        // 1. Traveled max distance
-        // 2. Intensity has faded too much
-        // Note: We continue on flat terrain - runout extends until it fades out
-        if runout_cells >= MAX_RUNOUT_CELLS {
-          break;
-        }
-        if current_intensity < 0.05 {
-          break;
-        }
-      }
-    }
-  }
-  
-  // Lateral spreading pass: expand runout zones to fill gaps between D8 flow paths
-  // This simulates debris spreading laterally as it flows downhill
-  const SPREAD_ITERATIONS: usize = 2;
-  const SPREAD_DECAY: f64 = 0.7; // Intensity multiplier for spread cells
-  
-  for _ in 0..SPREAD_ITERATIONS {
-    let mut spread_runout = runout.clone();
-    
-    for i in 1..(height - 1) {
-      for j in 1..(width - 1) {
-        if runout[i][j] > 0.0 {
-          // Spread to 4-connected neighbors (not diagonal, to avoid over-spreading)
-          let neighbors = [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)];
-          
-          for &(ny, nx) in &neighbors {
-            if ny > 0 && ny < height - 1 && nx > 0 && nx < width - 1 {
-              // Don't spread into steep excluded-aspect source zones (they show as red)
-              let neighbor_gradient = gradients[ny][nx];
-              let neighbor_azimuth = azimuths[ny][nx];
-              let mut is_source = false;
-              if neighbor_gradient >= START_ZONE_THRESHOLD {
-                for aspect in excluded_aspects {
-                  if aspect.contains_azimuth(neighbor_azimuth, Some(22.5)) {
-                    is_source = true;
-                    break;
-                  }
-                }
-              }
-              
-              if !is_source {
-                let spread_intensity = runout[i][j] * SPREAD_DECAY;
-                spread_runout[ny][nx] = spread_runout[ny][nx].max(spread_intensity);
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    runout = spread_runout;
-  }
-  
+  let flow_dir = compute_d8_flow_directions_flat(elevations, width, height);
+  let aspect_indices = build_aspect_indices(azimuths);
+  let excluded_mask = excluded_aspect_mask(excluded_aspects, true);
+  let mut spread_buffer = vec![0.0f32; n];
+  propagate_runout(
+    &mut runout,
+    &mut spread_buffer,
+    gradients,
+    &aspect_indices,
+    &flow_dir,
+    width,
+    height,
+    excluded_mask,
+  );
   runout
 }
 
-/// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for each pixel on a `Vec<f32>`
+// ---------------------------------------------------------------------------
+// Public WASM entrypoints
+// ---------------------------------------------------------------------------
+
+/// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for
+/// each pixel of a GeoTIFF-encoded elevation raster, then derive runout zones.
 #[wasm_bindgen]
 pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) -> Result<AzimuthResult, JsValue> {
-  // Parse excluded aspects from JS value
   let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
     vec![]
   } else {
     serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
   };
 
-  let cursor: Cursor<Vec<u8>> = Cursor::new(elevations_geotiff.to_vec());
-  let mut elevations_geotiff: GeoTiffReader<Cursor<Vec<u8>>> =
-    GeoTiffReader::open(cursor)
-      .map_err(|e| JsValue::from_str(&format!("Failed to open GeoTIFF: {:?}", e)))?;
-  let elevations: Vec<Vec<f64>> = get_raster(&mut elevations_geotiff)?;
+  let cursor = Cursor::new(elevations_geotiff.to_vec());
+  let mut reader = GeoTiffReader::open(cursor)
+    .map_err(|e| JsValue::from_str(&format!("Failed to open GeoTIFF: {:?}", e)))?;
+  let (elevations, width, height) = get_raster_flat(&mut reader)?;
 
-  let gx_kernel: [[f64; 5]; 5] = [
-    [-5.0, -4.0, 0.0, 4.0, 5.0],
-    [-8.0, -10.0, 0.0, 10.0, 8.0],
-    [-10.0, -20.0, 0.0, 20.0, 10.0],
-    [-8.0, -10.0, 0.0, 10.0, 8.0],
-    [-5.0, -4.0, 0.0, 4.0, 5.0],
-  ];
-
-  let gy_kernel: [[f64; 5]; 5] = [
-    [-5.0, -8.0, -10.0, -8.0, -5.0],
-    [-4.0, -10.0, -20.0, -10.0, -4.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0],
-    [4.0, 10.0, 20.0, 10.0, 4.0],
-    [5.0, 8.0, 10.0, 8.0, 5.0],
-  ];
-
-  let height: usize = elevations.len();
-  let width: usize = elevations[0].len();
-
-  let mut azimuths: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
-  let mut gradients: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
-
-  // Apply convolution
-  for i in 2..(height - 2) {
-    for j in 2..(width - 2) {
-      let mut gx: f64 = 0.0;
-      let mut gy: f64 = 0.0;
-
-      // Apply the 5x5 kernel
-      for ki in 0..5 {
-        for kj in 0..5 {
-          let x: usize = j + kj - 2;
-          let y: usize = i + ki - 2;
-          let pixel_value: f64 = elevations[y][x];
-
-          gx += pixel_value * gx_kernel[ki][kj];
-          gy += pixel_value * gy_kernel[ki][kj];
-        }
-      }
-
-      // Compute azimuth for the current pixel
-      let azimuth: f64 = calculate_azimuth(gx, gy);
-      azimuths[i][j] = azimuth;
-      gradients[i][j] = compute_gradient_along_azimuth(gx, gy, azimuth);
-    }
-  }
-
-  // Compute runout zones based on excluded aspects
-  let runout_zones = compute_runout_zones(&elevations, &azimuths, &gradients, &excluded_aspects_vec);
-
-  let geo_keys: Vec<u32> = elevations_geotiff.geo_keys.as_ref()
+  let geo_keys = reader.geo_keys.as_ref()
     .ok_or_else(|| JsValue::from_str("Missing geo_keys"))?
     .clone();
-  let origin: [f64; 2] = elevations_geotiff.origin()
-    .ok_or_else(|| JsValue::from_str("Missing origin"))?;
+  let origin = reader.origin().ok_or_else(|| JsValue::from_str("Missing origin"))?;
+  let pixel_scale_deg = reader.pixel_size().unwrap_or([1.0 / 10800.0, -1.0 / 10800.0]);
 
-  // Serialize all rasters to GeoTIFF format
-  let elevations_geotiff_bytes = serialize_to_geotiff(elevations, &geo_keys, &origin)?;
-  let runout_zones_geotiff_bytes = serialize_to_geotiff(runout_zones, &geo_keys, &origin)?;
-  
+  // Convert degrees-per-pixel to meters at the raster centre latitude.
+  let centre_lat = origin[1] + (pixel_scale_deg[1] * height as f64) / 2.0;
+  let (px_x_m, px_y_m) = deg_pixel_to_meters(pixel_scale_deg, centre_lat);
+
+  let (azimuths, gradients) = compute_sobel_flat(&elevations, width, height, px_x_m, px_y_m);
+  let runout_zones = compute_runout_zones_flat(
+    &elevations, &azimuths, &gradients, width, height, &excluded_aspects_vec,
+  );
+
+  // ModelPixelScale is stored positive; georaster will negate the y component on read.
+  let out_pixel_scale = [pixel_scale_deg[0].abs(), pixel_scale_deg[1].abs()];
+
   Ok(AzimuthResult {
-    elevations: elevations_geotiff_bytes,
-    azimuths: serialize_to_geotiff(azimuths, &geo_keys, &origin)?,
-    gradients: serialize_to_geotiff(gradients, &geo_keys, &origin)?,
-    runout_zones: runout_zones_geotiff_bytes,
+    elevations: serialize_to_geotiff_flat(&elevations, width, height, &geo_keys, &origin, &out_pixel_scale)?,
+    azimuths: serialize_to_geotiff_flat(&azimuths, width, height, &geo_keys, &origin, &out_pixel_scale)?,
+    gradients: serialize_to_geotiff_flat(&gradients, width, height, &geo_keys, &origin, &out_pixel_scale)?,
+    runout_zones: serialize_to_geotiff_flat(&runout_zones, width, height, &geo_keys, &origin, &out_pixel_scale)?,
   })
 }
 
-/// Compute azimuths from raw elevation array (Float32Array) instead of GeoTIFF.
-/// This is more efficient for AWS Terrain Tiles which are already decoded as Float32Array.
-/// Returns raw Float32Array data for elevations, azimuths, gradients, and runout zones.
-/// Runout zones are pre-computed for ALL 8 aspects and packed sequentially:
-/// [N channel, NE channel, E channel, SE channel, S channel, SW channel, W channel, NW channel]
-/// Each channel is width*height f32 values.
+/// Compute azimuths from a raw elevation Float32Array. Used for AWS Terrain
+/// Tiles which are already decoded as flat arrays. Runout is computed lazily.
+///
+/// `pixel_size_x_m` and `pixel_size_y_m` give the per-pixel cell size in
+/// meters (callers compute these from raster bounds and the centre latitude).
+/// If omitted the function falls back to 10m (legacy behaviour).
 #[wasm_bindgen]
 pub fn compute_azimuths_from_array(
   elevations_flat: &[f32],
   width: u32,
   height: u32,
-  _excluded_aspects: JsValue,  // Ignored - we now compute all aspects
+  _excluded_aspects: JsValue,
+  pixel_size_x_m: Option<f64>,
+  pixel_size_y_m: Option<f64>,
 ) -> Result<AzimuthArrayResult, JsValue> {
-  console_log(&format!("[WASM] compute_azimuths_from_array called: {}x{}, {} elements", width, height, elevations_flat.len()));
-  
+  console_log(&format!(
+    "[WASM] compute_azimuths_from_array called: {}x{}, {} elements",
+    width, height, elevations_flat.len()
+  ));
   let width = width as usize;
   let height = height as usize;
-  
-  // Validate input size
+
   if elevations_flat.len() != width * height {
     return Err(JsValue::from_str(&format!(
       "Elevation array size {} doesn't match dimensions {}x{}={}",
       elevations_flat.len(), width, height, width * height
     )));
   }
-  
-  // Validate minimum dimensions for 5x5 kernel (need at least 5x5)
   if width < 5 || height < 5 {
     return Err(JsValue::from_str(&format!(
       "Elevation grid too small: {}x{}, minimum is 5x5 for Sobel filtering",
       width, height
     )));
   }
-  
-  console_log("[WASM] Validation passed, converting to 2D array");
 
-  // Convert flat array to 2D Vec<Vec<f64>> for processing
-  let elevations: Vec<Vec<f64>> = (0..height)
-    .map(|row| {
-      (0..width)
-        .map(|col| elevations_flat[row * width + col] as f64)
-        .collect()
-    })
-    .collect();
+  let px_x = pixel_size_x_m.unwrap_or(10.0);
+  let px_y = pixel_size_y_m.unwrap_or(10.0);
 
-  let gx_kernel: [[f64; 5]; 5] = [
-    [-5.0, -4.0, 0.0, 4.0, 5.0],
-    [-8.0, -10.0, 0.0, 10.0, 8.0],
-    [-10.0, -20.0, 0.0, 20.0, 10.0],
-    [-8.0, -10.0, 0.0, 10.0, 8.0],
-    [-5.0, -4.0, 0.0, 4.0, 5.0],
-  ];
-
-  let gy_kernel: [[f64; 5]; 5] = [
-    [-5.0, -8.0, -10.0, -8.0, -5.0],
-    [-4.0, -10.0, -20.0, -10.0, -4.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0],
-    [4.0, 10.0, 20.0, 10.0, 4.0],
-    [5.0, 8.0, 10.0, 8.0, 5.0],
-  ];
-
-  let mut azimuths: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
-  let mut gradients: Vec<Vec<f64>> = vec![vec![0.0; width]; height];
-
-  // Apply convolution
-  for i in 2..(height - 2) {
-    for j in 2..(width - 2) {
-      let mut gx: f64 = 0.0;
-      let mut gy: f64 = 0.0;
-
-      // Apply the 5x5 kernel
-      for ki in 0..5 {
-        for kj in 0..5 {
-          let x: usize = j + kj - 2;
-          let y: usize = i + ki - 2;
-          let pixel_value: f64 = elevations[y][x];
-
-          gx += pixel_value * gx_kernel[ki][kj];
-          gy += pixel_value * gy_kernel[ki][kj];
-        }
-      }
-
-      // Compute azimuth for the current pixel
-      let azimuth: f64 = calculate_azimuth(gx, gy);
-      azimuths[i][j] = azimuth;
-      gradients[i][j] = compute_gradient_along_azimuth(gx, gy, azimuth);
-    }
-  }
-
-  // Skip runout computation here - it will be done lazily when aspects are selected
-  console_log("[WASM] Skipping runout computation (lazy evaluation on aspect change)");
-
-  // Flatten all 2D arrays to 1D Vec<f32>
-  console_log("[WASM] Flattening arrays");
-  let elevations_flat: Vec<f32> = elevations.into_iter().flatten().map(|x| x as f32).collect();
-  let azimuths_flat: Vec<f32> = azimuths.into_iter().flatten().map(|x| x as f32).collect();
-  let gradients_flat: Vec<f32> = gradients.into_iter().flatten().map(|x| x as f32).collect();
-  
-  console_log("[WASM] Arrays flattened, returning result");
+  let (azimuths, gradients) = compute_sobel_flat(elevations_flat, width, height, px_x, px_y);
 
   Ok(AzimuthArrayResult {
-    elevations: elevations_flat,
-    azimuths: azimuths_flat,
-    gradients: gradients_flat,
-    runout_zones: Vec::new(), // Empty - computed lazily
+    elevations: elevations_flat.to_vec(),
+    azimuths,
+    gradients,
+    runout_zones: Vec::new(),
     width: width as u32,
     height: height as u32,
   })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+  use super::*;
+
+  fn tilted_x(width: usize, height: usize, slope: f64, dx: f64) -> Vec<f32> {
+    let mut data = vec![0.0f32; width * height];
+    for i in 0..height {
+      for j in 0..width {
+        data[i * width + j] = (slope * (j as f64) * dx) as f32;
+      }
+    }
+    data
+  }
+
+  #[test]
+  fn sobel_recovers_known_slope_x() {
+    let slope = (10.0_f64).to_radians().tan(); // ≈ 0.1763
+    let dx = 10.0;
+    let elev = tilted_x(15, 15, slope, dx);
+    let (azimuths, gradients) = compute_sobel_flat(&elev, 15, 15, dx, dx);
+    let centre = 7 * 15 + 7;
+    // East-rising terrain → west-facing slope, azimuth 270°.
+    assert!((azimuths[centre] as f64 - 270.0).abs() < 1.0,
+      "expected azimuth ≈ 270, got {}", azimuths[centre]);
+    assert!((gradients[centre] as f64 - slope).abs() < 1e-3,
+      "expected gradient ≈ {}, got {}", slope, gradients[centre]);
+  }
+
+  #[test]
+  fn sobel_flat_returns_flat_sentinel() {
+    let elev = vec![1234.5f32; 15 * 15];
+    let (azimuths, gradients) = compute_sobel_flat(&elev, 15, 15, 10.0, 10.0);
+    let centre = 7 * 15 + 7;
+    assert_eq!(azimuths[centre], -1.0);
+    assert_eq!(gradients[centre], 0.0);
+  }
+
+  #[test]
+  fn border_cells_are_flat() {
+    let elev = vec![100.0f32; 15 * 15];
+    let (azimuths, _) = compute_sobel_flat(&elev, 15, 15, 10.0, 10.0);
+    assert_eq!(azimuths[0], -1.0);
+    assert_eq!(azimuths[15 * 15 - 1], -1.0);
+  }
+
+  #[test]
+  fn aspect_from_azimuth_wraps_north_correctly() {
+    assert_eq!(Aspect::from_azimuth(0.0), Aspect::North);
+    assert_eq!(Aspect::from_azimuth(15.0), Aspect::North);
+    assert_eq!(Aspect::from_azimuth(345.0), Aspect::North);
+    assert_eq!(Aspect::from_azimuth(360.0), Aspect::North);
+    assert_eq!(Aspect::from_azimuth(45.0), Aspect::Northeast);
+    assert_eq!(Aspect::from_azimuth(90.0), Aspect::East);
+    assert_eq!(Aspect::from_azimuth(180.0), Aspect::South);
+    assert_eq!(Aspect::from_azimuth(-1.0), Aspect::Flat);
+  }
+
+  #[test]
+  fn excluded_aspect_mask_with_tolerance_includes_neighbours() {
+    let mask = excluded_aspect_mask(&[Aspect::North], true);
+    assert_eq!(mask, 0b1000_0011, "North + tolerance should include NE and NW");
+    let mask = excluded_aspect_mask(&[Aspect::North], false);
+    assert_eq!(mask, 0b0000_0001);
+  }
+
+  #[test]
+  fn d8_picks_steepest_descent() {
+    let mut elev = vec![0.0f32; 5 * 5];
+    for i in 0..5 {
+      for j in 0..5 {
+        elev[i * 5 + j] = (4 - j) as f32;
+      }
+    }
+    let flow = compute_d8_flow_directions_flat(&elev, 5, 5);
+    // Centre cell descends east (dir 2).
+    assert_eq!(flow[2 * 5 + 2], 2);
+  }
+
+  #[test]
+  fn runout_decays_along_flow() {
+    let width = 20;
+    let height = 5;
+    let mut elev = vec![0.0f32; width * height];
+    for i in 0..height {
+      for j in 0..width {
+        elev[i * width + j] = ((width - j) as f32) * 5.0;
+      }
+    }
+    let (az, grad) = compute_sobel_flat(&elev, width, height, 10.0, 10.0);
+    let runout = compute_runout_zones_flat(&elev, &az, &grad, width, height, &[Aspect::West]);
+    // No NaNs, all values within [0, 1].
+    for &v in &runout {
+      assert!(v >= 0.0 && v <= 1.0, "runout out of range: {}", v);
+    }
+  }
 }
