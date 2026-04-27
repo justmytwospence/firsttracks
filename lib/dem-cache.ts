@@ -502,6 +502,86 @@ async function fetchTileWithCache(x: number, y: number, zoom: number): Promise<F
  * Get the union bounds of all cached individual tiles.
  * Used to display cached region on page load.
  */
+/**
+ * Group cached individual tiles into connected regions and return one Bounds per region.
+ * Two tiles are part of the same region if they are 4-adjacent (share an edge).
+ * The returned rectangles are the bounding boxes of each connected component, so
+ * a contiguous patch of cached tiles shows as one rectangle and a separate cached
+ * area shows as its own rectangle.
+ */
+export async function getCachedIndividualTilesRegions(): Promise<Bounds[]> {
+  try {
+    const db = await openDB();
+    const keys: IDBValidKey[] = await new Promise((resolve) => {
+      const tx = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readonly');
+      const req = tx.objectStore(INDIVIDUAL_TILES_STORE_NAME).getAllKeys();
+      req.onerror = () => resolve([]);
+      req.onsuccess = () => resolve(req.result as IDBValidKey[]);
+    });
+
+    // Bucket tiles by zoom; within a zoom, BFS to connect 4-adjacent tiles.
+    const tilesByZoom = new Map<number, Set<string>>();
+    for (const k of keys) {
+      if (typeof k !== 'string') continue;
+      const parts = k.split('/');
+      if (parts.length !== 3) continue;
+      const z = Number(parts[0]);
+      const x = Number(parts[1]);
+      const y = Number(parts[2]);
+      if (!Number.isFinite(z) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+      let bucket = tilesByZoom.get(z);
+      if (!bucket) {
+        bucket = new Set();
+        tilesByZoom.set(z, bucket);
+      }
+      bucket.add(`${x},${y}`);
+    }
+
+    const regions: Bounds[] = [];
+    for (const [z, set] of tilesByZoom) {
+      const visited = new Set<string>();
+      for (const start of set) {
+        if (visited.has(start)) continue;
+        // BFS the connected component
+        const queue: string[] = [start];
+        visited.add(start);
+        let minX = Number.POSITIVE_INFINITY;
+        let maxX = Number.NEGATIVE_INFINITY;
+        let minY = Number.POSITIVE_INFINITY;
+        let maxY = Number.NEGATIVE_INFINITY;
+        while (queue.length > 0) {
+          const cur = queue.shift() as string;
+          const [cxStr, cyStr] = cur.split(',');
+          const cx = Number(cxStr);
+          const cy = Number(cyStr);
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nk = `${cx + dx},${cy + dy}`;
+            if (set.has(nk) && !visited.has(nk)) {
+              visited.add(nk);
+              queue.push(nk);
+            }
+          }
+        }
+        const nw = tileToLatLng(minX, minY, z);
+        const se = tileToLatLng(maxX + 1, maxY + 1, z);
+        regions.push({
+          north: nw.lat,
+          south: se.lat,
+          east: se.lng,
+          west: nw.lng,
+        });
+      }
+    }
+    return regions;
+  } catch {
+    return [];
+  }
+}
+
 export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
   try {
     const db = await openDB();

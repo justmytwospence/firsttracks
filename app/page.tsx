@@ -25,7 +25,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
-import { type AzimuthData, type Bounds, cacheAzimuths, expandBounds, findCachedAzimuthBoundsContaining, getAzimuthsWithContainsCheck, getCachedIndividualTilesBounds, getDEMWithContainsCheck, getFirstCachedAzimuths } from "@/lib/dem-cache";
+import { type AzimuthData, type Bounds, cacheAzimuths, expandBounds, findCachedAzimuthBoundsContaining, getAzimuthsWithContainsCheck, getCachedIndividualTilesBounds, getCachedIndividualTilesRegions, getDEMWithContainsCheck, getFirstCachedAzimuths } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
 import { formatSlope, gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
 import { hoverIndexStore as defaultHoverIndexStore, slopeUnitStore } from "@/store";
@@ -72,7 +72,10 @@ export default function PathFinderPage() {
   const explorationLayerRef = useRef<ExplorationLayerHandle>(null);
   const [avoidRunoutZones, setAvoidRunoutZones] = useState(true);
   const [cachedBounds, setCachedBounds] = useState<Bounds | null>(null);
-  const [dataBounds, setDataBounds] = useState<Bounds | null>(null);
+  // Visible cached-region overlay. Driven by IDB tile keys, not by per-fetch state,
+  // so disjoint cached areas each render as their own merged rectangle and `Reset`
+  // can't blow away the visual indicator.
+  const [dataRegions, setDataRegions] = useState<Bounds[]>([]);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFilename, setExportFilename] = useState("path");
   const [helpOpen, setHelpOpen] = useState(false);
@@ -263,6 +266,18 @@ export default function PathFinderPage() {
     }
   }, [derivedPathAspects, pathAspects]);
 
+  // Re-derive the visible cached-region rectangles from the IDB tile cache.
+  // Called after any operation that may have added tiles (preload, pathfind expansion)
+  // and on reset/location changes so the indicator stays in sync with what's actually cached.
+  const refreshDataRegions = useCallback(async () => {
+    try {
+      const regions = await getCachedIndividualTilesRegions();
+      setDataRegions(regions);
+    } catch (err) {
+      console.warn('[DataRegions] Failed to refresh:', err);
+    }
+  }, []);
+
   // Build a multi-band GeoRaster from raw Float32 typed arrays — bypasses the
   // GeoTIFF encode/decode round-trip that used to live in the worker + Rust.
   const handleSetAspectRaster = useCallback(
@@ -318,7 +333,7 @@ export default function PathFinderPage() {
         
         if (cachedTileBounds) {
           console.log('[Startup] Found cached tile bounds:', cachedTileBounds);
-          setDataBounds(cachedTileBounds);
+          await refreshDataRegions();
           setCachedBounds(cachedTileBounds);
           
           // Also try to load cached azimuths for the raster overlay
@@ -345,7 +360,7 @@ export default function PathFinderPage() {
         console.log('[Startup] First cached azimuths:', firstCachedAzimuths ? 'found' : 'not found');
         if (firstCachedAzimuths?.bounds) {
           console.log('[Startup] Found cached azimuths (fallback):', firstCachedAzimuths.bounds);
-          setDataBounds(firstCachedAzimuths.bounds);
+          await refreshDataRegions();
           setCachedBounds(firstCachedAzimuths.bounds);
           currentAzimuthDataRef.current = firstCachedAzimuths;
           handleSetAspectRaster(
@@ -365,7 +380,7 @@ export default function PathFinderPage() {
     }
     
     loadCachedBounds();
-  }, [handleSetAspectRaster]);
+  }, [handleSetAspectRaster, refreshDataRegions]);
 
   // Preload DEM and compute azimuths with progress toasts
   const preloadTerrainData = useCallback(async (preloadBounds: Bounds) => {
@@ -378,7 +393,7 @@ export default function PathFinderPage() {
       if (cachedAzimuths) {
         console.log('[Preload] Using cached azimuths');
         currentAzimuthDataRef.current = cachedAzimuths;
-        setDataBounds(cachedAzimuths.bounds);
+        refreshDataRegions();
         handleSetAspectRaster(
           cachedAzimuths.azimuths,
           cachedAzimuths.gradients,
@@ -394,9 +409,9 @@ export default function PathFinderPage() {
       toast.loading("Downloading elevation data...", { id: demToastId });
       const demGrid = await getDEMWithContainsCheck(preloadBounds);
       toast.dismiss(demToastId);
-      
-      // Update data bounds immediately to show actual tile coverage
-      setDataBounds(demGrid.bounds);
+
+      // The fetch may have added new tiles to IDB — refresh the visible regions.
+      refreshDataRegions();
 
       // Step 2: Compute azimuths and runout zones for all 8 aspects
       toast.loading("Computing terrain aspects & runout zones...", { id: azimuthToastId });
@@ -431,7 +446,7 @@ export default function PathFinderPage() {
       console.error('[Preload] Failed to preload terrain data:', error);
       toast.error("Failed to load terrain data");
     }
-  }, [excludedAspects, handleSetAspectRaster]);
+  }, [excludedAspects, handleSetAspectRaster, refreshDataRegions]);
 
   // Compute runout zones when aspect selection changes (lazy computation).
   // Guarded with a ref so we don't fire a worker round-trip on mount when the
@@ -522,7 +537,10 @@ export default function PathFinderPage() {
     setPathSegmentBoundaries([]);
     setBounds(null);
     setCachedBounds(null);
-    setDataBounds(null);
+    // Don't clear dataRegions — the IDB cache itself isn't cleared on reset, so the
+    // visual indicator should keep showing what's still cached. Re-derive from IDB
+    // in case anything has changed.
+    refreshDataRegions();
     setIsLoading(false);
     setPathAspects(null);
     setAspectRaster(null);
@@ -534,17 +552,17 @@ export default function PathFinderPage() {
 
   // Handle data bounds changes from FindPathButton (e.g., when terrain is expanded for out-of-bounds waypoints)
   const handleDataBoundsChange = useCallback((newBounds: Bounds) => {
-    setDataBounds(newBounds);
+    // The visual cache regions are derived from IDB; the new tiles will be picked up.
+    refreshDataRegions();
     // Also update cachedBounds if the new data coverage is larger
     // This ensures subsequent pathfinding uses the expanded bounds
     setCachedBounds(prev => {
       if (!prev) return newBounds;
-      // Keep the larger bounds
       const prevArea = (prev.north - prev.south) * (prev.east - prev.west);
       const newArea = (newBounds.north - newBounds.south) * (newBounds.east - newBounds.west);
       return newArea > prevArea ? newBounds : prev;
     });
-  }, []);
+  }, [refreshDataRegions]);
 
   // Callback for exploration updates from pathfinder
   // Uses imperative API to bypass React state for performance
@@ -639,13 +657,14 @@ export default function PathFinderPage() {
   );
 
   const handleLocationSelect = useCallback((center: [number, number]) => {
-    // Reset everything when searching for a new location
+    // Reset everything when searching for a new location, but keep the cached-region
+    // visual — the IDB cache survives, so the rectangles should too.
     setWaypoints([]);
     setWaypointIds([]);
     setPath(null);
     setPathSegmentBoundaries([]);
     setCachedBounds(null);
-    setDataBounds(null);
+    refreshDataRegions();
     setPathAspects(null);
     setAspectRaster(null);
     explorationLayerRef.current?.clear();
@@ -653,7 +672,7 @@ export default function PathFinderPage() {
     explorationCountRef.current = 0;
     lastAutoPathfindingCount.current = 0;
     setMapCenter(center);
-  }, []);
+  }, [refreshDataRegions]);
 
   // Handle waypoint drag end - update waypoint position and trigger full re-pathfinding
   const handleMarkerDragEnd = useCallback((index: number, newPosition: Point) => {
@@ -1383,8 +1402,8 @@ export default function PathFinderPage() {
                 avoidRunoutZones={avoidRunoutZones}
               />
             )}
-            {dataBounds && (
-              <LeafletBoundsLayer bounds={dataBounds} />
+            {dataRegions.length > 0 && (
+              <LeafletBoundsLayer regions={dataRegions} />
             )}
           </LazyPolylineMap>
         </div>
