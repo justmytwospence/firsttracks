@@ -1,6 +1,5 @@
 "use client";
 
-import { GlobalProgressBar } from "@/components/global-progress-bar";
 import { Toaster } from "@/components/ui/sonner";
 
 export default function ReactProviders({
@@ -10,7 +9,6 @@ export default function ReactProviders({
 }) {
   return (
     <>
-      <GlobalProgressBar />
       <Toaster />
       {children}
     </>

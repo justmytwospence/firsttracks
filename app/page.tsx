@@ -3,6 +3,7 @@
 import { AspectChart } from "@/components/aspect-chart";
 import ElevationProfile from "@/components/elevation-chart";
 import FindPathButton, { type Aspect } from "@/components/find-path-button";
+import { GlobalProgressBar } from "@/components/global-progress-bar";
 import GradientCDF from "@/components/gradient-cdf-chart";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import LocationSearch from "@/components/location-search";
@@ -1301,6 +1302,7 @@ export default function PathFinderPage() {
       <div id="main-content" className="flex-1 relative flex flex-col min-h-0 min-w-0">
         {/* Map container - takes remaining space */}
         <div className="flex-1 relative min-h-0 w-full">
+          <GlobalProgressBar />
           {/* Help popover content - top left of map */}
           {helpOpen && (
             <div 

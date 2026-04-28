@@ -311,7 +311,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       
       setIsLoading(true);
       onStartPathfinding?.();
-      progressStore.getState().finish();
+      progressStore.getState().start("Preparing");
 
       const worker = workerRef.current;
       const sessionId = `session_${Date.now()}`;
@@ -327,9 +327,10 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           
           if (!azimuthResult) {
             // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
-            progressStore.getState().start(
-              waypointsOutsideBounds ? "Expanding terrain coverage" : "Downloading elevation data"
-            );
+            progressStore.getState().update({
+              label: waypointsOutsideBounds ? "Expanding terrain coverage" : "Downloading elevation data",
+              fraction: null,
+            });
 
             const demGrid: ElevationGrid = await getDEMWithContainsCheck(effectiveBounds, {
               onProgress: ({ message, done, total }) => {
