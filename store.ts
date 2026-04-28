@@ -23,9 +23,21 @@ interface SlopeUnitState {
   setUseDegrees: (useDegrees: boolean) => void;
 }
 
+interface ProgressState {
+  active: boolean;
+  label: string | null;
+  fraction: number | null;
+  tone: 'info' | 'error';
+  start: (label: string) => void;
+  update: (patch: { label?: string; fraction?: number | null }) => void;
+  finish: () => void;
+  fail: (label: string) => void;
+}
+
 export type HoverIndexStore = UseBoundStore<StoreApi<HoverIndexState>>;
 export type GradientStore = UseBoundStore<StoreApi<GradientState>>;
 export type SlopeUnitStore = UseBoundStore<StoreApi<SlopeUnitState>>;
+export type ProgressStore = UseBoundStore<StoreApi<ProgressState>>;
 
 export const createHoverIndexStore = () => create<HoverIndexState>()(
   subscribeWithSelector((set) => ({
@@ -73,3 +85,56 @@ export const createSlopeUnitStore = () => create<SlopeUnitState>()(
   )
 );
 export const slopeUnitStore = createSlopeUnitStore();
+
+// Tracks a single in-flight long-running operation (DEM download, aspect
+// computation, A* search) for the GlobalProgressBar. Only one runs at a time.
+export const createProgressStore = () => {
+  let clearTimer: ReturnType<typeof setTimeout> | null = null;
+
+  return create<ProgressState>()(
+    subscribeWithSelector((set) => {
+      const cancelClearTimer = () => {
+        if (clearTimer) {
+          clearTimeout(clearTimer);
+          clearTimer = null;
+        }
+      };
+
+      return {
+        active: false,
+        label: null,
+        fraction: null,
+        tone: 'info',
+        start: (label) => {
+          cancelClearTimer();
+          set({ active: true, label, fraction: null, tone: 'info' });
+        },
+        update: (patch) => set((state) => {
+          if (!state.active) return state;
+          const next: Partial<ProgressState> = {};
+          if (patch.label !== undefined && patch.label !== state.label) next.label = patch.label;
+          if (patch.fraction !== undefined && patch.fraction !== state.fraction) next.fraction = patch.fraction;
+          return Object.keys(next).length ? next : state;
+        }),
+        finish: () => {
+          cancelClearTimer();
+          // Snap to 100% briefly so a determinate run reads as complete, then clear.
+          set((state) => state.fraction !== null ? { fraction: 1 } : state);
+          clearTimer = setTimeout(() => {
+            clearTimer = null;
+            set({ active: false, label: null, fraction: null, tone: 'info' });
+          }, 250);
+        },
+        fail: (label) => {
+          cancelClearTimer();
+          set({ active: true, label, tone: 'error' });
+          clearTimer = setTimeout(() => {
+            clearTimer = null;
+            set({ active: false, label: null, fraction: null, tone: 'info' });
+          }, 1500);
+        },
+      };
+    })
+  );
+};
+export const progressStore = createProgressStore();
