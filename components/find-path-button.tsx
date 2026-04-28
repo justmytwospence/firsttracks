@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
+import { progressStore } from "@/store";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
@@ -216,13 +217,13 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         preloadingRef.current = false;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
-        toast.dismiss();
+        progressStore.getState().finish();
       } else if (waypointCountDecreased && isLoading) {
         shouldStopRef.current = true;
         currentPathfindingIdRef.current = null;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
-        toast.dismiss();
+        progressStore.getState().finish();
         setTimeout(() => { shouldStopRef.current = false; }, 0);
       } else {
         shouldStopRef.current = false;
@@ -310,9 +311,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       
       setIsLoading(true);
       onStartPathfinding?.();
-      toast.dismiss();
-      
-      const loadingToastId = "pathfinder-loading";
+      progressStore.getState().finish();
+
       const worker = workerRef.current;
       const sessionId = `session_${Date.now()}`;
       currentPathfindingIdRef.current = sessionId;
@@ -327,24 +327,26 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           
           if (!azimuthResult) {
             // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
-            toast.message(waypointsOutsideBounds ? "Expanding terrain coverage..." : "Downloading elevation data...", { 
-              id: loadingToastId, 
-              duration: Number.POSITIVE_INFINITY 
-            });
-            
+            progressStore.getState().start(
+              waypointsOutsideBounds ? "Expanding terrain coverage" : "Downloading elevation data"
+            );
+
             const demGrid: ElevationGrid = await getDEMWithContainsCheck(effectiveBounds, {
-              onProgress: (message) => {
-                toast.message(message, { id: loadingToastId, duration: Number.POSITIVE_INFINITY });
+              onProgress: ({ message, done, total }) => {
+                progressStore.getState().update({
+                  label: message,
+                  fraction: done !== undefined && total ? done / total : null,
+                });
               }
             });
-            
+
             // Report actual data bounds to parent
             onDataBoundsChange?.(demGrid.bounds);
-            
+
             // Compute azimuths from array
-            toast.message("Computing azimuths and gradients...", { 
-              id: loadingToastId, 
-              duration: Number.POSITIVE_INFINITY 
+            progressStore.getState().update({
+              label: "Computing aspects",
+              fraction: null,
             });
             
             const azimuthsPromise = new Promise<AzimuthData>((resolve, reject) => {
@@ -402,7 +404,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             bounds: azimuthResult.bounds,
           };
 
-          toast.dismiss(loadingToastId);
           setAspectRaster(
             azimuthResult.azimuths,
             azimuthResult.gradients,
@@ -429,7 +430,15 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         let pathSegmentCounter = willOnlyDoLastSegment ? 1 : 0; // Start at 1 to append
         
         try {
+          const totalSegments = waypoints.length - 1 - startSegment;
           for (let i = startSegment; i < waypoints.length - 1; i++) {
+            const segmentIndex = i - startSegment;
+            progressStore.getState().update({
+              label: totalSegments > 1
+                ? `Searching segment ${segmentIndex + 1} of ${totalSegments}`
+                : "Searching route",
+              fraction: totalSegments > 1 ? segmentIndex / totalSegments : null,
+            });
             const pathPromise = new Promise<string>((resolve, reject) => {
             const id = `path_${Date.now()}_${i}`;
             
@@ -491,14 +500,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           
           try {
             const pathJson = await pathPromise;
-            
+
             // Check if this pathfinding session was cancelled
             if (currentPathfindingIdRef.current !== sessionId) {
               return; // Exit the loop, pathfinding was cancelled
             }
-            
-            toast.dismiss(loadingToastId);
-            
+
             const pathData = JSON.parse(pathJson);
             const rawCoordinates = pathData.features.map(
               (point: { geometry: { coordinates: [number, number] } }) => 
@@ -539,11 +546,15 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         lastSuccessfulWaypointCountRef.current = waypoints.length;
         
       } catch (error) {
-        toast.dismiss(loadingToastId);
         const errorMessage = error instanceof Error ? error.message : String(error);
+        progressStore.getState().fail(errorMessage || "Failed to find path");
         toast.error(errorMessage || "Failed to find path.");
       } finally {
-        toast.dismiss(loadingToastId);
+        // If the run reached the end without failing, finish settles the bar.
+        // If it failed, fail() already scheduled its own clear; finish() is a no-op cancel.
+        if (progressStore.getState().tone !== 'error') {
+          progressStore.getState().finish();
+        }
         setIsLoading(false);
       }
     }, [
