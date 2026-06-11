@@ -126,16 +126,15 @@ describe("expandBounds", () => {
     expect(expanded.west).toBeCloseTo(baseBounds.west, 5);
   });
 
-  it("shrinks bounds when factor is less than 1", () => {
+  it("never shrinks bounds when factor is less than 1", () => {
+    // Shrinking would drop waypoints sitting on the far edge, so the
+    // factor is clamped to a minimum of 1.
     const expanded = expandBounds(baseBounds, 0.5);
-    const originalWidth = baseBounds.east - baseBounds.west;
-    const originalHeight = baseBounds.north - baseBounds.south;
 
-    const newWidth = expanded.east - expanded.west;
-    const newHeight = expanded.north - expanded.south;
-
-    expect(newWidth).toBeCloseTo(originalWidth * 0.5, 5);
-    expect(newHeight).toBeCloseTo(originalHeight * 0.5, 5);
+    expect(expanded.north).toBeCloseTo(baseBounds.north, 5);
+    expect(expanded.south).toBeCloseTo(baseBounds.south, 5);
+    expect(expanded.east).toBeCloseTo(baseBounds.east, 5);
+    expect(expanded.west).toBeCloseTo(baseBounds.west, 5);
   });
 
   it("does not limit small expansions (no API limits with AWS Terrain Tiles)", () => {
