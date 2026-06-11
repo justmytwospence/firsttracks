@@ -12,7 +12,7 @@ This is a **Next.js 15 + App Router** application for interactive terrain-aware 
 
 - Click-to-place waypoints on an interactive Leaflet map
 - Find optimal paths using Rust WASM module with A* algorithm and real-time exploration visualization
-- Download DEM data from OpenTopo API (cached in IndexedDB)
+- Download DEM data from AWS Terrain Tiles (Terrarium, cached in IndexedDB)
 - Compute azimuths/gradients and display aspect raster overlay
 - Export path as GPX
 - Display elevation profile, gradient CDF, and aspect distribution charts
@@ -26,7 +26,6 @@ This is a **Next.js 15 + App Router** application for interactive terrain-aware 
 ## Environment Requirements
 ```bash
 NEXT_PUBLIC_JAWG_ACCESS_TOKEN="" # Jawg Maps tile layer
-OPEN_TOPO_API_KEY="" # OpenTopography DEM data
 ```
 
 ## Miscellaneous
