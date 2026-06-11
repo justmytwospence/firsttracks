@@ -191,7 +191,7 @@ export default function GeoJsonInteractionLayer({
     if (geoJsonRef.current) {
       geoJsonRef.current.setStyle((feature) => ({
         color:
-          feature?.properties?.gradient >= (hoveredGradient ?? 0)
+          hoveredGradient !== null && feature?.properties?.gradient >= hoveredGradient
             ? "orange"
             : "black",
         weight: 3,

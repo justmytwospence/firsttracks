@@ -187,21 +187,27 @@ export default function ElevationChart({
             if (hoveredGradient === null) {
               return "rgba(128, 128, 128, 0.5)";
             }
-            
+
+            // The store holds rise/run ratios; this dataset is in display
+            // units, so convert the threshold to match before comparing.
+            const hoveredDisplay = useDegrees
+              ? gradientToSlopeAngle(hoveredGradient)
+              : hoveredGradient;
+
             let isHighlighted = false;
             if (gradientValue !== null) {
               if (gradientHighlightMode === 'histogram') {
                 // Histogram mode: highlight only points within the 1% bin
                 const binSize = useDegrees ? gradientToSlopeAngle(0.01) : 0.01;
-                const binMin = hoveredGradient - binSize / 2;
-                const binMax = hoveredGradient + binSize / 2;
+                const binMin = hoveredDisplay - binSize / 2;
+                const binMax = hoveredDisplay + binSize / 2;
                 isHighlighted = gradientValue >= binMin && gradientValue < binMax;
               } else {
                 // CDF mode: highlight points >= threshold
-                isHighlighted = gradientValue >= hoveredGradient;
+                isHighlighted = gradientValue >= hoveredDisplay;
               }
             }
-            
+
             return isHighlighted
               ? "rgba(255, 0, 0, 0.5)"
               : "rgba(128, 128, 128, 0.5)";

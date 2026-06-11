@@ -1,7 +1,7 @@
 "use client";
 
 import { computeCdf, computeGradient } from "@/lib/geo/geo";
-import { formatSlope, gradientToSlopeAngle } from "@/lib/utils";
+import { gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
 import { gradientStore, slopeUnitStore } from "@/store";
 import type { ActiveElement, ChartEvent, ChartOptions } from "chart.js";
 import type { LineString } from "geojson";
@@ -293,13 +293,16 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       const xAxis = chart.scales.x;
 
       if (x >= xAxis.left && x <= xAxis.right) {
-        const gradientValue = xAxis.getValueForPixel(x);
-        if (gradientValue === null || gradientValue === undefined) {
+        const axisValue = xAxis.getValueForPixel(x);
+        if (axisValue === null || axisValue === undefined) {
           setHoveredGradient(null);
           return;
         }
+        // The store always holds rise/run ratios; convert from the axis
+        // unit so map-layer consumers comparing raw gradients keep working.
+        const ratio = useDegrees ? slopeAngleToGradient(axisValue) : axisValue;
         // CDF mode: highlight all points >= this gradient
-        setHoveredGradient(gradientValue, 'cdf');
+        setHoveredGradient(ratio, 'cdf');
       } else {
         setHoveredGradient(null);
       }
@@ -314,10 +317,11 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       const xAxis = chart.scales.x;
 
       if (x >= xAxis.left && x <= xAxis.right) {
-        const gradientValue = xAxis.getValueForPixel(x);
-        if (gradientValue === null || gradientValue === undefined) return;
-        
-        setHoveredGradient(gradientValue, 'cdf');
+        const axisValue = xAxis.getValueForPixel(x);
+        if (axisValue === null || axisValue === undefined) return;
+
+        const ratio = useDegrees ? slopeAngleToGradient(axisValue) : axisValue;
+        setHoveredGradient(ratio, 'cdf');
         setIsGradientLocked(true);
       }
     },
