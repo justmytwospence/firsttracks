@@ -895,6 +895,7 @@ export default function PathFinderPage() {
               variant="ghost"
               size="icon"
               className="h-8 w-8 text-muted-foreground hover:text-foreground"
+              aria-label="Help"
               onClick={() => setHelpOpen(!helpOpen)}
             >
               <HelpCircle className="h-5 w-5" />
@@ -938,10 +939,11 @@ export default function PathFinderPage() {
                     size="icon" 
                     className="shrink-0 h-10 w-10"
                     disabled={waypoints.length === 0}
+                    aria-label="Undo last waypoint"
                   >
                     <Undo2 className="h-4 w-4" />
                   </Button>
-                  <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-10 w-10" disabled={waypoints.length === 0}>
+                  <Button variant="outline" onClick={handleReset} size="icon" className="shrink-0 h-10 w-10" disabled={waypoints.length === 0} aria-label="Reset route">
                     <RotateCcw className="h-4 w-4" />
                   </Button>
                   <Button
@@ -949,6 +951,7 @@ export default function PathFinderPage() {
                     size="icon"
                     className="shrink-0 h-10 w-10"
                     onClick={() => gpxInputRef.current?.click()}
+                    aria-label="Import GPX file"
                   >
                     <Upload className="h-4 w-4" />
                   </Button>
@@ -958,6 +961,7 @@ export default function PathFinderPage() {
                     className="shrink-0 h-10 w-10"
                     disabled={path == null}
                     onClick={() => setExportDialogOpen(true)}
+                    aria-label="Export GPX file"
                   >
                     <Download className="h-4 w-4" />
                   </Button>
@@ -987,6 +991,8 @@ export default function PathFinderPage() {
                     <div className="flex rounded-md border text-xs">
                       <button
                         type="button"
+                        aria-label="Show slopes as percent gradient"
+                        aria-pressed={!useDegrees}
                         onClick={() => setUseDegrees(false)}
                         className={`px-1.5 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
                       >
@@ -994,6 +1000,8 @@ export default function PathFinderPage() {
                       </button>
                       <button
                         type="button"
+                        aria-label="Show slopes in degrees"
+                        aria-pressed={useDegrees}
                         onClick={() => setUseDegrees(true)}
                         className={`px-1.5 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
                       >
@@ -1007,6 +1015,9 @@ export default function PathFinderPage() {
                     <span className="text-xs text-muted-foreground">Animate</span>
                     <button
                       type="button"
+                      role="switch"
+                      aria-checked={showFrontier}
+                      aria-label="Animate pathfinding exploration"
                       onClick={() => setShowFrontier(!showFrontier)}
                       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
                     >
@@ -1019,6 +1030,9 @@ export default function PathFinderPage() {
                     <span className="text-xs text-muted-foreground">Runouts</span>
                     <button
                       type="button"
+                      role="switch"
+                      aria-checked={avoidRunoutZones}
+                      aria-label="Avoid avalanche runout zones"
                       onClick={() => setAvoidRunoutZones(!avoidRunoutZones)}
                       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${avoidRunoutZones ? 'bg-amber-500' : 'bg-gray-300'}`}
                     >
@@ -1094,6 +1108,8 @@ export default function PathFinderPage() {
                   <button
                     key={pageId}
                     type="button"
+                    aria-label={`Go to ${pageId} page`}
+                    aria-current={sheetPage === i}
                     onClick={() => {
                       if (sheetScrollRef.current) {
                         const pageWidth = sheetScrollRef.current.offsetWidth;
@@ -1136,6 +1152,8 @@ export default function PathFinderPage() {
               <div className="flex rounded-md border text-xs">
                 <button
                   type="button"
+                  aria-label="Show slopes as percent gradient"
+                  aria-pressed={!useDegrees}
                   onClick={() => setUseDegrees(false)}
                   className={`px-2 py-0.5 rounded-l-md transition-colors ${!useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
                 >
@@ -1143,6 +1161,8 @@ export default function PathFinderPage() {
                 </button>
                 <button
                   type="button"
+                  aria-label="Show slopes in degrees"
+                  aria-pressed={useDegrees}
                   onClick={() => setUseDegrees(true)}
                   className={`px-2 py-0.5 rounded-r-md transition-colors ${useDegrees ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'}`}
                 >
@@ -1156,6 +1176,9 @@ export default function PathFinderPage() {
               <span className="text-sm">Animate</span>
               <button
                 type="button"
+                role="switch"
+                aria-checked={showFrontier}
+                aria-label="Animate pathfinding exploration"
                 onClick={() => setShowFrontier(!showFrontier)}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showFrontier ? 'bg-blue-500' : 'bg-gray-300'}`}
               >
@@ -1168,6 +1191,9 @@ export default function PathFinderPage() {
               <span className="text-sm">Avoid Runouts</span>
               <button
                 type="button"
+                role="switch"
+                aria-checked={avoidRunoutZones}
+                aria-label="Avoid avalanche runout zones"
                 onClick={() => setAvoidRunoutZones(!avoidRunoutZones)}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${avoidRunoutZones ? 'bg-amber-500' : 'bg-gray-300'}`}
               >
@@ -1306,6 +1332,8 @@ export default function PathFinderPage() {
       {!isPortrait && (
         <button
           type="button"
+          aria-label={panelOpen ? "Collapse control panel" : "Expand control panel"}
+          aria-expanded={panelOpen}
           onClick={() => setPanelOpen(!panelOpen)}
           className="absolute z-[1000] bg-background border rounded-full shadow-lg hover:bg-accent transition-all duration-300 p-2"
           style={{ 
@@ -1323,7 +1351,10 @@ export default function PathFinderPage() {
         <div className="flex-1 relative min-h-0 w-full">
           {/* Help popover content - top left of map */}
           {helpOpen && (
-            <div 
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Help"
               className="absolute top-3 left-3 z-[1000] w-80 max-h-[calc(100%-3.5rem)] overflow-y-auto rounded-md border bg-popover p-4 text-popover-foreground shadow-md animate-in fade-in-0 zoom-in-95"
             >
               <button
@@ -1438,6 +1469,7 @@ export default function PathFinderPage() {
             {/* Toggle button for dock - sits on top edge of dock */}
             <button
               type="button"
+              aria-expanded={chartsDockOpen}
               onClick={() => setChartsDockOpen(!chartsDockOpen)}
               className="absolute left-1/2 -translate-x-1/2 bottom-full z-[1000] bg-background border border-b-0 rounded-t-lg px-4 py-1 hover:bg-accent transition-colors flex items-center gap-2"
             >
@@ -1515,6 +1547,8 @@ export default function PathFinderPage() {
           {/* Drag handle - always visible, tappable to toggle panel, swipeable */}
           <button
             type="button"
+            aria-label={panelOpen ? "Collapse panel" : "Expand panel"}
+            aria-expanded={panelOpen}
             onClick={() => setPanelOpen(!panelOpen)}
             onTouchStart={(e) => {
               touchStartY.current = e.touches[0].clientY;

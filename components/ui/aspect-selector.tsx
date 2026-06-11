@@ -127,7 +127,7 @@ export function AspectSelector({
               fill={isSelected ? "hsl(var(--primary))" : "hsl(var(--muted))"}
               stroke="hsl(var(--border))"
               strokeWidth="1"
-              className="transition-[filter] hover:brightness-90 outline-none focus:outline-none"
+              className="transition-[filter] hover:brightness-90 outline-none focus-visible:ring-2 focus-visible:ring-ring"
               role="button"
               tabIndex={0}
               aria-label={`${aspectLabels[aspect]} direction${isSelected ? ' (selected)' : ''}`}
@@ -165,7 +165,7 @@ export function AspectSelector({
         fill="hsl(var(--background))"
         stroke="hsl(var(--border))"
         strokeWidth="1"
-        className="cursor-pointer transition-[filter] hover:brightness-95 outline-none focus:outline-none"
+        className="cursor-pointer transition-[filter] hover:brightness-95 outline-none focus-visible:ring-2 focus-visible:ring-ring"
         role="button"
         tabIndex={0}
         aria-label="Clear all selected directions"
