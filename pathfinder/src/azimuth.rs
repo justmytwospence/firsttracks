@@ -115,7 +115,7 @@ pub enum Aspect {
 
 impl Aspect {
   pub fn from_azimuth(azimuth: f64) -> Aspect {
-    if azimuth < 0.0 {
+    if azimuth < 0.0 || azimuth.is_nan() {
       return Aspect::Flat;
     }
     let normalized = azimuth.rem_euclid(360.0);
@@ -189,8 +189,10 @@ fn build_excluded_azimuth_mask(azimuths: &[f32], excluded: &[Aspect]) -> Vec<boo
 /// Calculate azimuth (degrees, 0..360, or -1 for flat) from horizontal (gx)
 /// and vertical (gy) Sobel responses.
 pub fn calculate_azimuth(gx: f64, gy: f64) -> f64 {
-  if gx == 0.0 && gy == 0.0 {
-    return -1.0;
+  // NaN responses (nodata in the Sobel window) are treated as flat rather
+  // than letting NaN propagate into the azimuth raster.
+  if gx.is_nan() || gy.is_nan() || (gx == 0.0 && gy == 0.0) {
+    return AZIMUTH_FLAT as f64;
   }
   // Invert gx so that east-rising terrain reports a west-facing aspect (descent direction).
   let azimuth_radians = (-gx).atan2(gy);

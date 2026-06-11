@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use geojson::{FeatureCollection, GeoJson, Geometry, Value};
 use js_sys::Function;
@@ -72,11 +72,18 @@ fn exponential_multiplier(x: f64) -> f64 {
 // The intensity constants live together in azimuth.rs with the invariants.
 const RUNOUT_PENALTY_SCALE: f64 = 10.0;
 
-/// Edge cost = base distance × gradient multiplier × runout penalty (u32).
+/// Fixed-point scale applied before truncating costs to u32. Working in
+/// centimeters keeps quantization error negligible: raw meter truncation let
+/// sums of floored edge costs undercut the floored heuristic (breaking
+/// admissibility) and turned sub-meter edges into zero-cost moves.
+const COST_SCALE: f64 = 100.0;
+
+/// Edge cost = base distance × gradient multiplier × runout penalty,
+/// fixed-point u32. Edges round UP so no edge undercuts the heuristic.
 fn cost_fn(distance_m: f64, gradient: f64, runout_intensity: f32) -> u32 {
   let gradient_multiplier = linear_multiplier(gradient);
   let runout_penalty = 1.0 + (runout_intensity as f64) * RUNOUT_PENALTY_SCALE;
-  (distance_m * gradient_multiplier * runout_penalty) as u32
+  (distance_m * gradient_multiplier * runout_penalty * COST_SCALE).ceil() as u32
 }
 
 /// Exploration tracker — streams newly-explored cells to JS for the animated flood-fill overlay.
@@ -87,9 +94,10 @@ fn cost_fn(distance_m: f64, gradient: f64, runout_intensity: f32) -> u32 {
 /// of how fast or slow the search is moving through terrain.
 struct ExplorationTracker {
   callback: Option<Function>,
-  explored_cells: Vec<(u16, u16)>,
-  explored_set: HashSet<(usize, usize)>,
-  last_flush_idx: usize,
+  pending_cells: Vec<(u16, u16)>,
+  /// One bit per raster cell — dedup without hashing in the hot loop.
+  explored_bits: Vec<u64>,
+  width: usize,
   last_flush_time_ms: f64,
   nodes_since_time_check: u32,
 }
@@ -98,12 +106,13 @@ const FLUSH_INTERVAL_MS: f64 = 33.0;
 const TIME_CHECK_NODE_STRIDE: u32 = 200;
 
 impl ExplorationTracker {
-  fn new(callback: Option<Function>) -> Self {
+  fn new(callback: Option<Function>, width: usize, height: usize) -> Self {
+    let words = if callback.is_some() { (width * height).div_ceil(64) } else { 0 };
     Self {
       callback,
-      explored_cells: Vec::with_capacity(50_000),
-      explored_set: HashSet::with_capacity(50_000),
-      last_flush_idx: 0,
+      pending_cells: Vec::with_capacity(16_384),
+      explored_bits: vec![0u64; words],
+      width,
       last_flush_time_ms: js_sys::Date::now(),
       nodes_since_time_check: 0,
     }
@@ -132,10 +141,13 @@ impl ExplorationTracker {
     if self.callback.is_none() {
       return;
     }
-    if !self.explored_set.insert((x, y)) {
+    let bit = y * self.width + x;
+    let (word, mask) = (bit / 64, 1u64 << (bit % 64));
+    if self.explored_bits[word] & mask != 0 {
       return;
     }
-    self.explored_cells.push((x as u16, y as u16));
+    self.explored_bits[word] |= mask;
+    self.pending_cells.push((x as u16, y as u16));
 
     self.nodes_since_time_check += 1;
     if self.nodes_since_time_check >= TIME_CHECK_NODE_STRIDE {
@@ -150,25 +162,24 @@ impl ExplorationTracker {
 
   fn flush(&mut self) {
     let Some(ref callback) = self.callback else { return };
-    let new_cells = &self.explored_cells[self.last_flush_idx..];
-    if new_cells.is_empty() {
+    if self.pending_cells.is_empty() {
       return;
     }
 
-    // One allocation, one batched copy into JS.
-    let mut packed: Vec<u16> = Vec::with_capacity(new_cells.len() * 2);
-    for &(x, y) in new_cells {
+    // One allocation, one batched copy into JS; pending cells are drained so
+    // the buffer doesn't retain every cell for the whole search.
+    let mut packed: Vec<u16> = Vec::with_capacity(self.pending_cells.len() * 2);
+    for &(x, y) in &self.pending_cells {
       packed.push(x);
       packed.push(y);
     }
+    self.pending_cells.clear();
     let cells = js_sys::Uint16Array::from(&packed[..]);
 
     let obj = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&obj, &"type".into(), &"cells".into());
     let _ = js_sys::Reflect::set(&obj, &"cells".into(), &cells);
     let _ = callback.call1(&JsValue::NULL, &obj);
-
-    self.last_flush_idx = self.explored_cells.len();
   }
 }
 
@@ -178,6 +189,13 @@ impl ExplorationTracker {
 /// (NW-corner origin and pixel scale in degrees). Pixel scales are converted
 /// to meters via cos(centre_lat) so Sobel/A* edge costs are correct away from
 /// the equator. No GeoTIFF parsing on the hot path.
+///
+/// `max_gradient` deliberately limits only ASCENT along the direction of
+/// travel: skis descend terrain far steeper than they can climb, so descents
+/// cost the same as flat ground and traversing across a steep face is not
+/// gated by this parameter. Steep terrain is constrained separately by the
+/// excluded-aspect rule (cell Sobel gradient over `aspect_gradient_threshold`
+/// on an excluded aspect) and by runout blocking.
 #[wasm_bindgen]
 pub fn find_path_rs(
   elevations: &[f32],
@@ -221,6 +239,13 @@ pub fn find_path_rs(
   if has_runout && runout_zones.len() != expected_len {
     return Err(JsValue::from_str("runout_zones length mismatch"));
   }
+  // Exploration cells are streamed as packed u16 pairs; larger rasters would
+  // silently wrap the coordinates.
+  if width > u16::MAX as u32 || height > u16::MAX as u32 {
+    return Err(JsValue::from_str(&format!(
+      "Raster {}x{} exceeds the {} pixel per-axis limit", width, height, u16::MAX
+    )));
+  }
 
   // Convert degrees-per-pixel to meters at the raster centre. pixel_scale_y is
   // negative for terrain tiles (lat decreases as y increases).
@@ -260,7 +285,11 @@ pub fn find_path_rs(
   }
   let end_node: (usize, usize) = (end_x as usize, end_y as usize);
 
-  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(exploration_callback)));
+  let tracker = Rc::new(RefCell::new(ExplorationTracker::new(
+    exploration_callback,
+    width_us,
+    height_us,
+  )));
   tracker.borrow().send_init(
     (origin_x, origin_y),
     (pixel_scale_x, pixel_scale_y),
@@ -292,13 +321,29 @@ pub fn find_path_rs(
     is_blocked_by_aspect(i)
   };
 
+  // Fail fast with a specific message if an endpoint is itself blocked —
+  // otherwise the search exhausts the whole reachable raster before
+  // reporting a generic "No path found".
+  if is_blocked(idx(start_node.0, start_node.1)) {
+    return Err(JsValue::from_str(
+      "Start point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
+    ));
+  }
+  if is_blocked(idx(end_node.0, end_node.1)) {
+    return Err(JsValue::from_str(
+      "End point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
+    ));
+  }
+
   const DIRECTIONS: [(isize, isize); 8] = [
     (0, 1), (1, 0), (0, -1), (-1, 0),
     (1, 1), (1, -1), (-1, -1), (-1, 1),
   ];
 
   let heuristic = |&(x, y): &(usize, usize)| -> u32 {
-    octile_distance((x, y), end_node, px_x_m, px_y_m) as u32
+    // Floor (default truncation) keeps the heuristic admissible against
+    // ceil'd edge costs at the same fixed-point scale.
+    (octile_distance((x, y), end_node, px_x_m, px_y_m) * COST_SCALE) as u32
   };
 
   let successors = |&(x, y): &(usize, usize)| -> Vec<((usize, usize), u32)> {
@@ -338,7 +383,9 @@ pub fn find_path_rs(
       let d = euclidean_distance((x, y), (nx, ny), px_x_m, px_y_m);
       let dz = (elevations[n_idx] - cur_elev) as f64;
       let gradient = dz / d;
-      if gradient >= max_gradient {
+      // NaN elevations (nodata) would sail through the comparison below
+      // (NaN >= x is false) and poison the cost; treat them as impassable.
+      if !gradient.is_finite() || gradient >= max_gradient {
         continue;
       }
 
@@ -411,7 +458,23 @@ mod tests {
 
   #[test]
   fn cost_fn_floors_at_distance_for_flat_terrain() {
-    assert_eq!(cost_fn(10.0, 0.0, 0.0), 10);
+    assert_eq!(cost_fn(10.0, 0.0, 0.0), (10.0 * COST_SCALE) as u32);
+  }
+
+  #[test]
+  fn cost_fn_never_zero_for_positive_distance() {
+    // Sub-meter edges used to truncate to 0, making them free moves.
+    assert!(cost_fn(0.004, 0.0, 0.0) > 0);
+  }
+
+  #[test]
+  fn summed_edge_costs_never_undercut_heuristic() {
+    // Three 10.6 m cardinal edges vs the octile estimate for the same line.
+    // With raw meter truncation: 10+10+10 = 30 < floor(31.8) = 31 →
+    // inadmissible. Fixed-point ceil'd edges keep h <= true cost.
+    let edge = cost_fn(10.6, 0.0, 0.0);
+    let h = (octile_distance((0, 0), (3, 0), 10.6, 10.6) * COST_SCALE) as u32;
+    assert!(3 * edge >= h, "3 edges {} should be >= heuristic {}", 3 * edge, h);
   }
 
   #[test]

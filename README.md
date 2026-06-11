@@ -8,7 +8,7 @@ Interactive terrain-aware route planning with DEM analysis. Click-to-place waypo
 - **Pathfinding**: Find optimal paths using a Rust WASM module with A* algorithm
 - **Real-time Visualization**: Watch the pathfinding algorithm explore the terrain
 - **Aspect Analysis**: Visualize terrain aspects with a raster overlay; exclude certain aspects from pathfinding
-- **Gradient Control**: Set maximum gradient constraints for the pathfinding algorithm
+- **Gradient Control**: Set maximum gradient constraints for the pathfinding algorithm (limits ascent only — skis descend terrain far steeper than they can climb, so descents and cross-slope traverses are governed by the aspect exclusion and runout rules instead)
 - **Elevation Profile**: View the elevation profile of your planned route
 - **Gradient Distribution**: Analyze the gradient distribution with a CDF chart
 - **Aspect Distribution**: See the aspect distribution of your route
