@@ -24,16 +24,6 @@ function waypointsToBounds(waypoints: Point[]): Bounds | null {
 }
 
 /**
- * Check if all waypoints are within the given bounds.
- */
-function waypointsWithinBounds(waypoints: Point[], bounds: Bounds): boolean {
-  return waypoints.every(w => {
-    const [lon, lat] = w.coordinates;
-    return lat <= bounds.north && lat >= bounds.south && lon <= bounds.east && lon >= bounds.west;
-  });
-}
-
-/**
  * Smooth a path using Gaussian-weighted moving average.
  * This produces smoother, more natural-looking curves than simple corner cutting.
  * @param coords - Array of [lng, lat, elevation?] coordinates
@@ -154,7 +144,6 @@ interface FindPathButtonProps {
   onDataBoundsChange?: (bounds: Bounds) => void;
   className?: string;
   onlyLastSegment?: boolean;
-  preloadBounds?: Bounds | null;
   avoidRunoutZones?: boolean;
 }
 
@@ -189,20 +178,16 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       onDataBoundsChange,
       className,
       onlyLastSegment = false,
-      preloadBounds,
       avoidRunoutZones = true,
     },
     ref
   ) {
     const workerRef = useRef<Worker | null>(null);
     const [workerReady, setWorkerReady] = useState(false);
-    const shouldStopRef = useRef(false);
     const cachedAzimuthsRef = useRef<AzimuthData | null>(null);
     const currentPathfindingIdRef = useRef<string | null>(null);
     const prevWaypointCountRef = useRef(0);
     const lastSuccessfulWaypointCountRef = useRef(0);
-    const preloadingRef = useRef(false);
-    const lastPreloadedBoundsRef = useRef<string | null>(null);
 
     // Stop exploration animation and cancel pathfinding when waypoints are cleared or reduced (undo)
     useEffect(() => {
@@ -210,22 +195,16 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       prevWaypointCountRef.current = waypoints.length;
 
       if (waypoints.length === 0) {
-        shouldStopRef.current = true;
         cachedAzimuthsRef.current = null;
         currentPathfindingIdRef.current = null;
-        preloadingRef.current = false;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
         toast.dismiss();
       } else if (waypointCountDecreased && isLoading) {
-        shouldStopRef.current = true;
         currentPathfindingIdRef.current = null;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
         toast.dismiss();
-        setTimeout(() => { shouldStopRef.current = false; }, 0);
-      } else {
-        shouldStopRef.current = false;
       }
     }, [waypoints.length, setIsLoading, isLoading]);
     
@@ -239,7 +218,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       if (prevKey !== currentKey) {
         // Aspects changed - invalidate cached azimuths to force recomputation with new runout zones
         cachedAzimuthsRef.current = null;
-        lastPreloadedBoundsRef.current = null;
         prevExcludedAspectsRef.current = excludedAspects;
       }
     }, [excludedAspects]);
@@ -323,7 +301,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         // Only fetch/compute azimuths if not already cached in memory
         if (!azimuthResult) {
           // Check IndexedDB cache first (use effective bounds which may be expanded)
-          azimuthResult = await getAzimuthsWithContainsCheck(effectiveBounds, excludedAspects);
+          azimuthResult = await getAzimuthsWithContainsCheck(effectiveBounds);
           
           if (!azimuthResult) {
             // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
@@ -396,7 +374,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             azimuthResult = await azimuthsPromise;
 
             // Cache the computed azimuths to IndexedDB for next session.
-            await cacheAzimuths(demGrid.bounds, azimuthResult, excludedAspects);
+            await cacheAzimuths(demGrid.bounds, azimuthResult);
           }
 
           // Cache in memory for subsequent pathfinding in this session.

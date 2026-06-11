@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   cn,
-  convertKeysToCamelCase,
   formatSlope,
   gradientToSlopeAngle,
   slopeAngleToGradient,
@@ -96,51 +95,3 @@ describe("formatSlope", () => {
   });
 });
 
-describe("convertKeysToCamelCase", () => {
-  it("converts snake_case keys to camelCase", () => {
-    const input = { user_name: "john", user_age: 25 };
-    expect(convertKeysToCamelCase(input)).toEqual({
-      userName: "john",
-      userAge: 25,
-    });
-  });
-
-  it("handles nested objects", () => {
-    const input = { user_data: { first_name: "john", last_name: "doe" } };
-    expect(convertKeysToCamelCase(input)).toEqual({
-      userData: { firstName: "john", lastName: "doe" },
-    });
-  });
-
-  it("handles arrays", () => {
-    const input = [{ user_id: 1 }, { user_id: 2 }];
-    expect(convertKeysToCamelCase(input)).toEqual([
-      { userId: 1 },
-      { userId: 2 },
-    ]);
-  });
-
-  it("handles arrays in objects", () => {
-    const input = { user_list: [{ first_name: "john" }] };
-    expect(convertKeysToCamelCase(input)).toEqual({
-      userList: [{ firstName: "john" }],
-    });
-  });
-
-  it("returns primitives unchanged", () => {
-    expect(convertKeysToCamelCase("string")).toBe("string");
-    expect(convertKeysToCamelCase(123)).toBe(123);
-    expect(convertKeysToCamelCase(null)).toBe(null);
-    expect(convertKeysToCamelCase(undefined)).toBe(undefined);
-  });
-
-  it("handles keys without underscores", () => {
-    const input = { name: "john" };
-    expect(convertKeysToCamelCase(input)).toEqual({ name: "john" });
-  });
-
-  it("handles multiple underscores", () => {
-    const input = { user_first_name: "john" };
-    expect(convertKeysToCamelCase(input)).toEqual({ userFirstName: "john" });
-  });
-});

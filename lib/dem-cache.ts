@@ -208,10 +208,8 @@ function boundsToKey(bounds: Bounds): string {
 
 /**
  * Generate a cache key for azimuths.
- * Note: excludedAspects parameter is ignored - runout zones are now pre-computed
- * for all 8 aspects and combined client-side based on selection.
  */
-function azimuthCacheKey(bounds: Bounds, _excludedAspects?: string[]): string {
+function azimuthCacheKey(bounds: Bounds): string {
   const baseKey = boundsToKey(bounds);
   return `${baseKey}_azimuths`;
 }
@@ -635,7 +633,10 @@ export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
         let maxX = Number.NEGATIVE_INFINITY;
         let minY = Number.POSITIVE_INFINITY;
         let maxY = Number.NEGATIVE_INFINITY;
-        let zoom = TERRAIN_TILE_ZOOM;
+        // Only consider the canonical zoom: mixing x/y indices from
+        // different zoom levels into one min/max would produce garbage
+        // bounds (indices are not comparable across zooms).
+        const zoom = TERRAIN_TILE_ZOOM;
 
         for (const k of keys) {
           if (typeof k !== 'string') continue;
@@ -644,12 +645,11 @@ export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
           const z = Number(parts[0]);
           const x = Number(parts[1]);
           const y = Number(parts[2]);
-          if (!Number.isFinite(z) || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+          if (z !== zoom || !Number.isFinite(x) || !Number.isFinite(y)) continue;
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
           if (y > maxY) maxY = y;
-          zoom = z;
         }
 
         if (!Number.isFinite(minX)) {
@@ -754,64 +754,6 @@ async function fetchDEM(
 }
 
 /**
- * Get DEM data for bounds, using cache if available.
- * Returns an ElevationGrid with Float32Array elevation data and metadata.
- */
-export async function getDEM(
-  bounds: Bounds, 
-  options?: { 
-    onProgress?: (message: string) => void;
-  }
-): Promise<ElevationGrid> {
-  const { onProgress } = options || {};
-  
-  // Normalize bounds for consistent caching
-  const normalizedBounds = normalizeBounds(bounds);
-  const cacheKey = boundsToKey(normalizedBounds);
-  
-  // Check cache first
-  onProgress?.('Checking DEM cache...');
-  console.log('[DEM Cache] Looking for key:', cacheKey);
-  const cached = await getCachedTile(normalizedBounds);
-  
-  if (cached) {
-    console.log('[DEM Cache] Cache HIT');
-    onProgress?.('Using cached DEM data');
-    return cached;
-  }
-  
-  console.log('[DEM Cache] Cache MISS - fetching from AWS Terrain Tiles');
-  // Fetch from AWS S3
-  const grid = await fetchDEM(normalizedBounds, onProgress);
-  
-  // Cache for next time
-  onProgress?.('Caching DEM data...');
-  await cacheTile(grid);
-  console.log('[DEM Cache] Cached with key:', cacheKey);
-  
-  return grid;
-}
-
-/**
- * Clear all cached DEM tiles
- */
-export async function clearDEMCache(): Promise<void> {
-  try {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction(STORE_NAME, 'readwrite');
-      const store = transaction.objectStore(STORE_NAME);
-      const request = store.clear();
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
-    });
-  } catch {
-    // Clear failed
-  }
-}
-
-/**
  * Expand bounds by a factor, capped to stay within MAX_TILES limit.
  * A factor of 3 means the resulting bounds will be 3x the width and height.
  * The actual expansion may be reduced if it would exceed tile limits.
@@ -877,76 +819,6 @@ export function unionBounds(a: Bounds, b: Bounds): Bounds {
 }
 
 /**
- * Get all cached DEM tile bounds.
- * Returns an array of all cached bounds, useful for displaying cached regions on map load.
- */
-export async function getAllCachedBounds(): Promise<Bounds[]> {
-  try {
-    const db = await openDB();
-    
-    return new Promise((resolve) => {
-      const transaction = db.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
-      const request = store.getAll();
-      
-      request.onerror = () => resolve([]);
-      request.onsuccess = () => {
-        const tiles = request.result as CachedTile[];
-        resolve(tiles.map(t => t.bounds));
-      };
-    });
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Get the union of all cached DEM tile bounds.
- * Returns null if no tiles are cached.
- */
-export async function getCachedBoundsUnion(): Promise<Bounds | null> {
-  const allBounds = await getAllCachedBounds();
-  if (allBounds.length === 0) return null;
-  
-  return allBounds.reduce((union, bounds) => unionBounds(union, bounds));
-}
-
-/**
- * Find a cached tile that contains the requested bounds
- * Returns the bounds of the cached tile if found, null otherwise
- * Useful for showing the cached region on the map
- */
-export async function findCachedBoundsContaining(bounds: Bounds): Promise<Bounds | null> {
-  try {
-    const db = await openDB();
-    const normalizedBounds = normalizeBounds(bounds);
-    
-    return new Promise((resolve) => {
-      const transaction = db.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
-      const request = store.openCursor();
-      
-      request.onerror = () => resolve(null);
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (cursor) {
-          const tile = cursor.value as CachedTile;
-          if (boundsContain(tile.bounds, normalizedBounds)) {
-            resolve(tile.bounds);
-            return;
-          }
-          cursor.continue();
-        } else {
-          resolve(null);
-        }
-      };
-    });
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Find a cached tile that contains the requested bounds
  * Returns the cached ElevationGrid if found, null otherwise
  */
@@ -986,41 +858,6 @@ async function findContainingCachedTile(bounds: Bounds): Promise<ElevationGrid |
 }
 
 /**
- * Preload DEM data for expanded bounds in the background
- * Returns a promise that resolves when the preload is complete
- * Useful for fetching a larger area ahead of time (e.g., 3x viewport on first waypoint)
- */
-export async function preloadDEM(
-  bounds: Bounds,
-  options?: {
-    expansionFactor?: number;
-  }
-): Promise<void> {
-  const { expansionFactor = 3 } = options || {};
-  
-  // Expand and normalize bounds
-  const expandedBounds = expandBounds(bounds, expansionFactor);
-  const normalizedBounds = normalizeBounds(expandedBounds);
-  const cacheKey = boundsToKey(normalizedBounds);
-  
-  // Check if already cached
-  const cached = await getCachedTile(normalizedBounds);
-  if (cached) {
-    console.log('[DEM Preload] Already cached:', cacheKey);
-    return;
-  }
-  
-  console.log('[DEM Preload] Starting background fetch for:', cacheKey);
-  
-  try {
-    const grid = await fetchDEM(normalizedBounds);
-    await cacheTile(grid);
-    console.log('[DEM Preload] Cached expanded region:', cacheKey);
-  } catch (error) {
-    console.warn('[DEM Preload] Failed:', error);
-    // Preload failures are non-critical, don't throw
-  }
-}
 
 /**
  * Get DEM data for bounds, checking for containing cached tiles first
@@ -1058,37 +895,6 @@ export async function getDEMWithContainsCheck(
   return grid;
 }
 
-/**
- * Get approximate cache size (number of tiles)
- */
-export async function getDEMCacheStats(): Promise<{ count: number; oldestTimestamp?: number }> {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const transaction = db.transaction(STORE_NAME, 'readonly');
-      const store = transaction.objectStore(STORE_NAME);
-      const countRequest = store.count();
-      
-      countRequest.onerror = () => resolve({ count: 0 });
-      countRequest.onsuccess = () => {
-        const count = countRequest.result;
-        
-        // Get oldest timestamp
-        const index = store.index('timestamp');
-        const cursorRequest = index.openCursor();
-        
-        cursorRequest.onerror = () => resolve({ count });
-        cursorRequest.onsuccess = () => {
-          const cursor = cursorRequest.result;
-          const oldestTimestamp = cursor?.value?.timestamp;
-          resolve({ count, oldestTimestamp });
-        };
-      };
-    });
-  } catch {
-    return { count: 0 };
-  }
-}
 
 // ============ AZIMUTH CACHING ============
 
@@ -1106,10 +912,9 @@ export interface AzimuthData {
 
 /**
  * Get cached azimuths for bounds.
- * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  * Runout zones are pre-computed for all aspects.
  */
-export async function getCachedAzimuths(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function getCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
@@ -1142,19 +947,10 @@ export async function getCachedAzimuths(bounds: Bounds, _excludedAspects?: strin
     return null;
   }
 }
-
-/**
- * @deprecated No longer used - aspects are pre-computed
- */
-function aspectsMatch(_a?: string[], _b?: string[]): boolean {
-  return true; // Always match since aspects are pre-computed
-}
-
 /**
  * Find cached azimuths that contain the requested bounds.
- * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  */
-export async function findContainingCachedAzimuths(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function findContainingCachedAzimuths(bounds: Bounds): Promise<AzimuthData | null> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
@@ -1228,9 +1024,8 @@ export async function findCachedAzimuthBoundsContaining(bounds: Bounds): Promise
 
 /**
  * Cache computed azimuths.
- * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  */
-export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excludedAspects?: string[]): Promise<void> {
+export async function cacheAzimuths(bounds: Bounds, data: AzimuthData): Promise<void> {
   try {
     const db = await openDB();
     const normalizedBounds = normalizeBounds(bounds);
@@ -1313,9 +1108,8 @@ export async function getFirstCachedAzimuths(): Promise<AzimuthData | null> {
 
 /**
  * Get azimuths with cache check (exact match or containing).
- * Note: excludedAspects parameter is kept for backward compatibility but ignored.
  */
-export async function getAzimuthsWithContainsCheck(bounds: Bounds, _excludedAspects?: string[]): Promise<AzimuthData | null> {
+export async function getAzimuthsWithContainsCheck(bounds: Bounds): Promise<AzimuthData | null> {
   const normalizedBounds = normalizeBounds(bounds);
   
   // First check exact match

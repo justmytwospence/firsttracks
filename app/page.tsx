@@ -1044,7 +1044,6 @@ export default function PathFinderPage() {
                   onStartPathfinding={handleStartPathfinding}
                   onDataBoundsChange={handleDataBoundsChange}
                   onlyLastSegment={path !== null && !forceFullRepathRef.current}
-                  preloadBounds={cachedBounds}
                   avoidRunoutZones={avoidRunoutZones}
                   className="w-full"
                 />
@@ -1194,7 +1193,6 @@ export default function PathFinderPage() {
                 onStartPathfinding={handleStartPathfinding}
                 onDataBoundsChange={handleDataBoundsChange}
                 onlyLastSegment={path !== null && !forceFullRepathRef.current}
-                preloadBounds={cachedBounds}
                 avoidRunoutZones={avoidRunoutZones}
                 className="w-full"
               />
@@ -1396,7 +1394,6 @@ export default function PathFinderPage() {
           <LazyPolylineMap interactive={true}>
             <LeafletPathfindingLayer
               markers={waypoints}
-              markerIds={waypointIds}
               showLine={false}
               onMapClick={handleMapClick}
               onBoundsChange={handleBoundsChange}

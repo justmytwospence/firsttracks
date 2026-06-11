@@ -1,14 +1,12 @@
 import type { Bounds } from "@/lib/dem-cache";
-import { baseLogger } from "@/lib/logger";
 import type { Point } from "geojson";
 import L from "leaflet";
 import type { LatLngExpression } from "leaflet";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Marker, Polyline, useMap, useMapEvents } from "react-leaflet";
+import { useEffect, useRef } from "react";
+import { Polyline, useMap, useMapEvents } from "react-leaflet";
 
 interface LeafletPathfindingLayerProps {
   markers: Point[];
-  markerIds?: number[];
   showLine?: boolean;
   onMapClick?: (point: Point) => void;
   onBoundsChange?: (newBounds: Bounds) => Bounds;
@@ -29,7 +27,6 @@ const createWaypointIcon = () =>
 
 export default function LeafletPathfindingLayer({
   markers,
-  markerIds,
   showLine,
   onMapClick,
   onBoundsChange,
@@ -39,40 +36,6 @@ export default function LeafletPathfindingLayer({
   dragEndTimeRef,
 }: LeafletPathfindingLayerProps) {
   const map = useMap();
-  const [userLocation, setUserLocation] = useState<[number, number] | null>(
-    () => {
-      // Only read from localStorage synchronously in the initializer
-      const savedUserLocation = localStorage.getItem("userLocation");
-      if (savedUserLocation) {
-        return JSON.parse(savedUserLocation);
-      }
-      return null;
-    }
-  );
-
-  // Fetch geolocation asynchronously in useEffect
-  useEffect(() => {
-    // Only fetch if we don't already have a location
-    if (userLocation) return;
-    
-    if (navigator?.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const location: [number, number] = [
-            position.coords.latitude,
-            position.coords.longitude,
-          ];
-          localStorage.setItem("userLocation", JSON.stringify(location));
-          setUserLocation(location);
-        },
-        (error) => {
-          // User denied permission or geolocation unavailable - not a critical error
-          baseLogger.warn("Geolocation unavailable:", error.message || "Permission denied or not supported");
-        }
-      );
-    }
-  }, [userLocation]);
-
   const prevMapCenterRef = useRef<LatLngExpression | undefined>(mapCenter);
   const prevFitBoundsRef = useRef<Bounds | undefined>(fitBounds);
 
@@ -110,18 +73,15 @@ export default function LeafletPathfindingLayer({
   const localDragEndTimeRef = useRef(0);
   const effectiveDragEndTimeRef = dragEndTimeRef ?? localDragEndTimeRef;
 
-  const mapEvents = useMapEvents({
+  useMapEvents({
     click(e) {
       // Don't create new waypoints if we just finished dragging (within 500ms)
       const timeSinceDragEnd = Date.now() - effectiveDragEndTimeRef.current;
-      console.log('Map click event - isDragging:', isDraggingRef.current, 'timeSinceDragEnd:', timeSinceDragEnd);
       if (isDraggingRef.current || timeSinceDragEnd < 500) {
-        console.log('Suppressing map click - drag in progress or just ended');
         isDraggingRef.current = false;
         return;
       }
       if (onMapClick) {
-        console.log('Creating new waypoint from map click');
         const point: Point = {
           type: "Point",
           coordinates: [e.latlng.lng, e.latlng.lat],
@@ -143,14 +103,6 @@ export default function LeafletPathfindingLayer({
       }
     },
   });
-
-  // Track previous marker count (kept for potential future use)
-  const prevMarkerCountRef = useRef(markers.length);
-
-  // Update marker count ref without adjusting bounds
-  useEffect(() => {
-    prevMarkerCountRef.current = markers.length;
-  }, [markers.length]);
 
   // Add initialization effect for onMapMove
   useEffect(() => {
@@ -192,17 +144,14 @@ export default function LeafletPathfindingLayer({
       );
 
       marker.on('mousedown', () => {
-        console.log(`=== MOUSEDOWN on marker index=${index} ===`);
         isDraggingRef.current = true;
       });
 
       marker.on('dragstart', () => {
-        console.log(`=== DRAG START on marker index=${index} ===`);
         isDraggingRef.current = true;
       });
 
       marker.on('dragend', (e: L.DragEndEvent) => {
-        console.log(`=== DRAG END on marker index=${index} ===`);
         effectiveDragEndTimeRef.current = Date.now();
         
         if (onMarkerDragEnd) {
@@ -219,7 +168,6 @@ export default function LeafletPathfindingLayer({
       });
 
       marker.on('click', (e: L.LeafletMouseEvent) => {
-        console.log(`=== CLICK on marker index=${index} ===`);
         L.DomEvent.stopPropagation(e);
       });
 
@@ -235,14 +183,6 @@ export default function LeafletPathfindingLayer({
       leafletMarkersRef.current = [];
     };
   }, [markers, map, onMarkerDragEnd, effectiveDragEndTimeRef]);
-
-  // Debug: log when markers or markerIds change
-  useEffect(() => {
-    console.log('LeafletPathfindingLayer received:');
-    console.log('  markers count:', markers.length);
-    console.log('  markerIds:', JSON.stringify(markerIds));
-    console.log('  onMarkerDragEnd defined:', !!onMarkerDragEnd);
-  }, [markers, markerIds, onMarkerDragEnd]);
 
   return (
     <>

@@ -1,6 +1,5 @@
 "use client";
 
-import { baseLogger } from "@/lib/logger";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useEffect, useRef } from "react";
@@ -113,8 +112,6 @@ export default function LeafletMap(props: LeafletMapProps) {
     ? L.latLng(saved.center.lat, saved.center.lng)
     : L.latLng(39.977, -105.263);
   const initialZoom = saved?.zoom ?? 13;
-  
-  const mapRef = useRef<L.Map | null>(null);
 
   return (
     <MapContainer
@@ -128,7 +125,6 @@ export default function LeafletMap(props: LeafletMapProps) {
       attributionControl={props.interactive}
       doubleClickZoom={props.interactive}
       zoomAnimation={props.interactive}
-      ref={mapRef}
     >
       <TileLayer url={`https://tile.jawg.io/jawg-terrain/{z}/{x}/{y}{r}.png?access-token=${process.env.NEXT_PUBLIC_JAWG_ACCESS_TOKEN}`} />
       <MapResizeHandler />
