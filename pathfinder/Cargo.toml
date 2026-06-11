@@ -24,5 +24,16 @@ web-sys = { version = "0.3", features = ["console"] }
 lto = true
 strip = "symbols"
 
+# Modern rustc emits bulk-memory/sign-ext/etc. by default; wasm-pack's bundled
+# binaryen rejects them unless the features are enabled explicitly (this is
+# why wasm-opt used to be disabled outright).
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+wasm-opt = [
+  "-O3",
+  "--enable-bulk-memory",
+  "--enable-nontrapping-float-to-int",
+  "--enable-sign-ext",
+  "--enable-mutable-globals",
+  "--enable-reference-types",
+  "--enable-multivalue",
+]
