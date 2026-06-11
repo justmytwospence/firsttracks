@@ -5,40 +5,16 @@
  * a clean API for computing azimuths and finding paths.
  */
 
+import type {
+  AzimuthsResult,
+  ComputeAzimuthsFromArrayRequest,
+  ErrorResult,
+  WorkerResponse,
+} from '@/workers/pathfinder.worker';
 import type { AzimuthData, Bounds, ElevationGrid } from './dem-cache';
 
 // Re-export types for convenience
 export type { Bounds, ElevationGrid, AzimuthData };
-
-// Worker message types (mirror from worker file)
-interface ComputeAzimuthsFromArrayRequest {
-  type: 'compute_azimuths_from_array';
-  id: string;
-  elevations: Float32Array;
-  width: number;
-  height: number;
-  bounds: Bounds;
-  excludedAspects: string[];
-}
-
-interface AzimuthsResult {
-  type: 'azimuths_result';
-  id: string;
-  elevations_raw: Float32Array;
-  azimuths_raw: Float32Array;
-  gradients_raw: Float32Array;
-  width: number;
-  height: number;
-  bounds: Bounds;
-}
-
-interface ErrorResult {
-  type: 'error';
-  id: string;
-  message: string;
-}
-
-type WorkerResponse = AzimuthsResult | ErrorResult | { type: string; id: string };
 
 /**
  * Pathfinder service class - manages worker lifecycle and message handling

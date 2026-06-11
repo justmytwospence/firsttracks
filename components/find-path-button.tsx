@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
+import type { WorkerRequest, WorkerResponse } from "@/workers/pathfinder.worker";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
@@ -147,18 +148,6 @@ interface FindPathButtonProps {
   avoidRunoutZones?: boolean;
 }
 
-// Worker message types
-interface WorkerRequest {
-  type: "find_path" | "compute_azimuths" | "compute_azimuths_from_array";
-  id: string;
-  [key: string]: unknown;
-}
-
-interface WorkerResponse {
-  type: "exploration" | "path_result" | "azimuths_result" | "error";
-  id: string;
-  [key: string]: unknown;
-}
 
 const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
   function FindPathButton(
@@ -325,53 +314,9 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               duration: Number.POSITIVE_INFINITY 
             });
             
-            const azimuthsPromise = new Promise<AzimuthData>((resolve, reject) => {
-              const id = `azimuths_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-
-              const cleanup = () => {
-                worker.removeEventListener("message", handler);
-                worker.removeEventListener("error", onError);
-              };
-              const onError = (event: ErrorEvent) => {
-                cleanup();
-                reject(new Error(`Pathfinder worker error: ${event.message || "worker failed"}`));
-              };
-              const handler = (event: MessageEvent<WorkerResponse>) => {
-                if (event.data.id !== id) return;
-
-                cleanup();
-
-                if (event.data.type === "error") {
-                  reject(new Error(event.data.message as string));
-                } else if (event.data.type === "azimuths_result") {
-                  resolve({
-                    elevations: event.data.elevations_raw as Float32Array,
-                    azimuths: event.data.azimuths_raw as Float32Array,
-                    gradients: event.data.gradients_raw as Float32Array,
-                    width: event.data.width as number,
-                    height: event.data.height as number,
-                    bounds: event.data.bounds as Bounds,
-                  });
-                }
-              };
-
-              worker.addEventListener("message", handler);
-              worker.addEventListener("error", onError);
-              worker.postMessage(
-                {
-                  type: "compute_azimuths_from_array",
-                  id,
-                  elevations: demGrid.data,
-                  width: demGrid.width,
-                  height: demGrid.height,
-                  bounds: demGrid.bounds,
-                  excludedAspects,
-                } as WorkerRequest,
-                [demGrid.data.buffer as ArrayBuffer]
-              );
-            });
-
-            azimuthResult = await azimuthsPromise;
+            // The service transfers demGrid.data's buffer to the worker, same
+            // as the previous inline implementation did.
+            azimuthResult = await pathfinderService.computeAzimuths(demGrid, excludedAspects);
 
             // Cache the computed azimuths to IndexedDB for next session.
             await cacheAzimuths(demGrid.bounds, azimuthResult);
