@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { type AzimuthData, type Bounds, type ElevationGrid, boundsContain, cacheAzimuths, expandBounds, getAzimuthsWithContainsCheck, getDEMWithContainsCheck, unionBounds } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
+import { progressStore } from "@/store";
 import type { WorkerRequest, WorkerResponse } from "@/workers/pathfinder.worker";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import { Loader } from "lucide-react";
@@ -188,12 +189,12 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         currentPathfindingIdRef.current = null;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
-        toast.dismiss();
+        progressStore.getState().finish();
       } else if (waypointCountDecreased && isLoading) {
         currentPathfindingIdRef.current = null;
         lastSuccessfulWaypointCountRef.current = 0;
         setIsLoading(false);
-        toast.dismiss();
+        progressStore.getState().finish();
       }
     }, [waypoints.length, setIsLoading, isLoading]);
     
@@ -277,9 +278,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       
       setIsLoading(true);
       onStartPathfinding?.();
-      toast.dismiss();
-      
-      const loadingToastId = "pathfinder-loading";
+      progressStore.getState().start("Preparing");
+
       const worker = workerRef.current;
       const sessionId = `session_${Date.now()}`;
       currentPathfindingIdRef.current = sessionId;
@@ -294,26 +294,26 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           
           if (!azimuthResult) {
             // Fetch DEM data from AWS Terrain Tiles (with caching - will use preloaded expanded region if available)
-            toast.message(waypointsOutsideBounds ? "Expanding terrain coverage..." : "Downloading elevation data...", { 
-              id: loadingToastId, 
-              duration: Number.POSITIVE_INFINITY 
+            progressStore.getState().update({
+              label: waypointsOutsideBounds ? "Expanding terrain coverage" : "Downloading elevation data",
+              fraction: null,
             });
-            
+
             const demGrid: ElevationGrid = await getDEMWithContainsCheck(effectiveBounds, {
-              onProgress: (message) => {
-                toast.message(message, { id: loadingToastId, duration: Number.POSITIVE_INFINITY });
+              onProgress: ({ message, done, total }) => {
+                progressStore.getState().update({
+                  label: message,
+                  fraction: done !== undefined && total ? done / total : null,
+                });
               }
             });
-            
+
             // Report actual data bounds to parent
             onDataBoundsChange?.(demGrid.bounds);
-            
+
             // Compute azimuths from array
-            toast.message("Computing azimuths and gradients...", { 
-              id: loadingToastId, 
-              duration: Number.POSITIVE_INFINITY 
-            });
-            
+            progressStore.getState().update({ label: "Computing aspects", fraction: null });
+
             // The service transfers demGrid.data's buffer to the worker, same
             // as the previous inline implementation did.
             azimuthResult = await pathfinderService.computeAzimuths(demGrid, excludedAspects);
@@ -334,7 +334,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             bounds: azimuthResult.bounds,
           };
 
-          toast.dismiss(loadingToastId);
           setAspectRaster(
             azimuthResult.azimuths,
             azimuthResult.gradients,
@@ -356,10 +355,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         // compute them now — otherwise find_path receives an empty runout
         // array and the "Avoid Runouts" toggle silently does nothing.
         if (avoidRunoutZones && excludedAspects.length > 0 && !azimuthData.runout_zones) {
-          toast.message("Computing runout zones...", {
-            id: loadingToastId,
-            duration: Number.POSITIVE_INFINITY,
-          });
+          progressStore.getState().update({ label: "Computing runout zones", fraction: null });
           azimuthData.runout_zones = await pathfinderService.computeRunout(
             azimuthData.elevations,
             azimuthData.azimuths,
@@ -369,7 +365,6 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             azimuthData.bounds,
             excludedAspects,
           );
-          toast.dismiss(loadingToastId);
         }
 
         // Find paths - either all segments or just the last one
@@ -383,7 +378,15 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         let anySegmentFailed = false;
 
         try {
+          const totalSegments = waypoints.length - 1 - startSegment;
           for (let i = startSegment; i < waypoints.length - 1; i++) {
+            const segmentIndex = i - startSegment;
+            progressStore.getState().update({
+              label: totalSegments > 1
+                ? `Searching segment ${segmentIndex + 1} of ${totalSegments}`
+                : "Searching route",
+              fraction: totalSegments > 1 ? segmentIndex / totalSegments : null,
+            });
             const pathPromise = new Promise<string>((resolve, reject) => {
             const id = `path_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 11)}`;
 
@@ -459,9 +462,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             if (currentPathfindingIdRef.current !== sessionId) {
               return; // Exit the loop, pathfinding was cancelled
             }
-            
-            toast.dismiss(loadingToastId);
-            
+
             const pathData = JSON.parse(pathJson);
             const rawCoordinates = pathData.features.map(
               (point: { geometry: { coordinates: [number, number] } }) => 
@@ -505,11 +506,15 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         lastSuccessfulWaypointCountRef.current = anySegmentFailed ? 0 : waypoints.length;
 
       } catch (error) {
-        toast.dismiss(loadingToastId);
         const errorMessage = error instanceof Error ? error.message : String(error);
+        progressStore.getState().fail(errorMessage || "Failed to find path");
         toast.error(errorMessage || "Failed to find path.");
       } finally {
-        toast.dismiss(loadingToastId);
+        // If the run reached the end without failing, finish settles the bar.
+        // If it failed, fail() already scheduled its own clear; finish() cancels nothing.
+        if (progressStore.getState().tone !== 'error') {
+          progressStore.getState().finish();
+        }
         setIsLoading(false);
       }
     }, [

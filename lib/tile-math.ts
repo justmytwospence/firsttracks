@@ -20,6 +20,15 @@ export interface ElevationGrid {
   bounds: Bounds;
 }
 
+/** Progress update from a long-running fetch — message plus optional fraction. */
+export interface ProgressInfo {
+  message: string;
+  done?: number;
+  total?: number;
+}
+
+export type ProgressCallback = (info: ProgressInfo) => void;
+
 /** Zoom 14 provides ~10m resolution (comparable to USGS10m). */
 export const TERRAIN_TILE_ZOOM = 14;
 export const TERRAIN_TILE_SIZE = 256;

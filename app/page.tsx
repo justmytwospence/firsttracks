@@ -3,6 +3,7 @@
 import { AspectChart } from "@/components/aspect-chart";
 import ElevationProfile from "@/components/elevation-chart";
 import FindPathButton, { type Aspect } from "@/components/find-path-button";
+import { GlobalProgressBar } from "@/components/global-progress-bar";
 import GradientCDF from "@/components/gradient-cdf-chart";
 import LazyPolylineMap from "@/components/leaflet-map-lazy";
 import LocationSearch from "@/components/location-search";
@@ -28,7 +29,7 @@ import { Slider } from "@/components/ui/slider";
 import { type AzimuthData, type Bounds, cacheAzimuths, expandBounds, findCachedAzimuthBoundsContaining, getAzimuthsWithContainsCheck, getCachedIndividualTilesBounds, getCachedIndividualTilesRegions, getDEMWithContainsCheck, getFirstCachedAzimuths } from "@/lib/dem-cache";
 import { pathfinderService } from "@/lib/pathfinder-service";
 import { formatSlope, gradientToSlopeAngle, slopeAngleToGradient } from "@/lib/utils";
-import { hoverIndexStore as defaultHoverIndexStore, slopeUnitStore } from "@/store";
+import { hoverIndexStore as defaultHoverIndexStore, progressStore, slopeUnitStore } from "@/store";
 import { saveAs } from "file-saver";
 import type { FeatureCollection, LineString, Point } from "geojson";
 import type { GeoRaster } from "georaster";
@@ -36,7 +37,6 @@ import { BarChart3, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SiBuymeacoffee, SiGithub } from "react-icons/si";
-import { toast } from "sonner";
 
 const parseGeoraster = require("georaster");
 
@@ -392,11 +392,10 @@ export default function PathFinderPage() {
     loadCachedBounds();
   }, [handleSetAspectRaster, refreshDataRegions]);
 
-  // Preload DEM and compute azimuths with progress toasts
+  // Preload DEM and compute azimuths, surfacing progress through the global progress bar.
   const preloadTerrainData = useCallback(async (preloadBounds: Bounds) => {
-    const demToastId = "dem-download";
-    const azimuthToastId = "azimuth-compute";
-    
+    const progress = progressStore.getState();
+
     try {
       // Check if we already have azimuths cached for these bounds
       const cachedAzimuths = await getAzimuthsWithContainsCheck(preloadBounds);
@@ -416,17 +415,25 @@ export default function PathFinderPage() {
       }
 
       // Step 1: Download DEM (with tile-level caching - only fetches missing tiles)
-      toast.loading("Downloading elevation data...", { id: demToastId });
-      const demGrid = await getDEMWithContainsCheck(preloadBounds);
-      toast.dismiss(demToastId);
+      progress.start("Downloading elevation data");
+      const demGrid = await getDEMWithContainsCheck(preloadBounds, {
+        onProgress: ({ message, done, total }) => {
+          progressStore.getState().update({
+            label: message,
+            fraction: done !== undefined && total ? done / total : null,
+          });
+        },
+      });
 
       // The fetch may have added new tiles to IDB — refresh the visible regions.
       refreshDataRegions();
 
       // Step 2: Compute azimuths and runout zones for all 8 aspects
-      toast.loading("Computing terrain aspects & runout zones...", { id: azimuthToastId });
+      progressStore.getState().update({
+        label: "Computing terrain & runout zones",
+        fraction: null,
+      });
       const azimuthResult = await pathfinderService.computeAzimuths(demGrid, excludedAspects);
-      toast.dismiss(azimuthToastId);
 
       // Store the full azimuth data for recombining when aspects change
       const fullAzimuthData = {
@@ -449,12 +456,11 @@ export default function PathFinderPage() {
         fullAzimuthData.bounds,
       );
 
+      progressStore.getState().finish();
       console.log('[Preload] Terrain data ready');
     } catch (error) {
-      toast.dismiss(demToastId);
-      toast.dismiss(azimuthToastId);
       console.error('[Preload] Failed to preload terrain data:', error);
-      toast.error("Failed to load terrain data");
+      progressStore.getState().fail("Failed to load terrain data");
     }
   }, [excludedAspects, handleSetAspectRaster, refreshDataRegions]);
 
@@ -1349,6 +1355,7 @@ export default function PathFinderPage() {
       <div id="main-content" className="flex-1 relative flex flex-col min-h-0 min-w-0">
         {/* Map container - takes remaining space */}
         <div className="flex-1 relative min-h-0 w-full">
+          <GlobalProgressBar />
           {/* Help popover content - top left of map */}
           {helpOpen && (
             <div

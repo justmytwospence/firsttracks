@@ -9,6 +9,8 @@
 export {
   type Bounds,
   type ElevationGrid,
+  type ProgressInfo,
+  type ProgressCallback,
   boundsContain,
   expandBounds,
   getTilesForBounds,

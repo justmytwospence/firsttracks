@@ -9,7 +9,7 @@ export default function ReactProviders({
 }) {
   return (
     <>
-      <Toaster richColors expand={true} />
+      <Toaster />
       {children}
     </>
   );

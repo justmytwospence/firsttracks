@@ -8,6 +8,7 @@ import { fetchTerrainTile } from './terrarium';
 import {
   type Bounds,
   type ElevationGrid,
+  type ProgressCallback,
   MAX_TILES,
   TERRAIN_TILE_SIZE,
   TERRAIN_TILE_ZOOM,
@@ -370,43 +371,61 @@ export function stitchTiles(
  */
 async function fetchDEM(
   bounds: Bounds,
-  onProgress?: (message: string) => void
+  onProgress?: ProgressCallback
 ): Promise<ElevationGrid> {
   const zoom = TERRAIN_TILE_ZOOM;
   const tiles = getTilesForBounds(bounds, zoom);
-  
+
   if (tiles.length === 0) {
     throw new Error('No tiles found for bounds');
   }
-  
+
   // Check which tiles are already cached
   const cachedKeys = await getCachedTileKeys(tiles, zoom);
   const uncachedTiles = tiles.filter(t => !cachedKeys.has(tileKey(zoom, t.x, t.y)));
-  
+
   if (uncachedTiles.length > 0) {
-    onProgress?.(`Downloading ${uncachedTiles.length} of ${tiles.length} elevation tile(s)...`);
+    onProgress?.({
+      message: `Downloading ${uncachedTiles.length} of ${tiles.length} elevation tile(s)...`,
+      done: 0,
+      total: uncachedTiles.length,
+    });
   } else {
-    onProgress?.(`Using ${tiles.length} cached elevation tile(s)`);
+    onProgress?.({ message: `Using ${tiles.length} cached elevation tile(s)` });
   }
-  
+
   // Calculate grid dimensions
   const minX = Math.min(...tiles.map(t => t.x));
   const maxX = Math.max(...tiles.map(t => t.x));
   const minY = Math.min(...tiles.map(t => t.y));
   const maxY = Math.max(...tiles.map(t => t.y));
-  
+
   const tilesWide = maxX - minX + 1;
   const tilesHigh = maxY - minY + 1;
-  
-  // Fetch all tiles in parallel (uses cache when available)
-  const tilePromises = tiles.map(tile => 
-    fetchTileWithCache(tile.x, tile.y, zoom).then(data => ({
-      x: tile.x - minX,
-      y: tile.y - minY,
-      data,
-    }))
-  );
-  
+
+  // Fetch all tiles in parallel (uses cache when available). Count completions
+  // for uncached tiles so the progress fraction reflects actual network work.
+  const totalUncached = uncachedTiles.length;
+  let doneUncached = 0;
+  const tilePromises = tiles.map(tile => {
+    const wasCached = cachedKeys.has(tileKey(zoom, tile.x, tile.y));
+    return fetchTileWithCache(tile.x, tile.y, zoom).then(data => {
+      if (!wasCached && totalUncached > 0) {
+        doneUncached += 1;
+        onProgress?.({
+          message: `Downloading elevation ${doneUncached}/${totalUncached}`,
+          done: doneUncached,
+          total: totalUncached,
+        });
+      }
+      return {
+        x: tile.x - minX,
+        y: tile.y - minY,
+        data,
+      };
+    });
+  });
+
   const tileResults = await Promise.all(tilePromises);
 
   // Stitch tiles into single grid
@@ -475,15 +494,13 @@ async function findContainingCachedTile(bounds: Bounds): Promise<ElevationGrid |
 }
 
 /**
-
-/**
  * Get DEM data for bounds, checking for containing cached tiles first
  * This allows preloaded larger regions to serve smaller requests
  */
 export async function getDEMWithContainsCheck(
   bounds: Bounds,
   options?: {
-    onProgress?: (message: string) => void;
+    onProgress?: ProgressCallback;
   }
 ): Promise<ElevationGrid> {
   const { onProgress } = options || {};
@@ -493,19 +510,19 @@ export async function getDEMWithContainsCheck(
   // Look for a cached stitched grid covering the request. (There is no
   // exact-key fast path: records are keyed by their tile-aligned stitched
   // bounds, which never match a request's normalized bounds.)
-  onProgress?.('Checking DEM cache...');
+  onProgress?.({ message: 'Checking DEM cache...' });
   const containingCached = await findContainingCachedTile(normalizedBounds);
 
   if (containingCached) {
     console.log('[DEM Cache] Found containing cached tile');
-    onProgress?.('Using cached DEM data');
+    onProgress?.({ message: 'Using cached DEM data' });
     return containingCached;
   }
 
   console.log('[DEM Cache] Cache MISS - fetching from AWS Terrain Tiles');
   const grid = await fetchDEM(normalizedBounds, onProgress);
 
-  onProgress?.('Caching DEM data...');
+  onProgress?.({ message: 'Caching DEM data...' });
   await cacheTile(grid);
   console.log('[DEM Cache] Cached stitched grid with key:', boundsToKey(grid.bounds));
 

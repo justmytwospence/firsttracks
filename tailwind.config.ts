@@ -48,6 +48,15 @@ const config: Config = {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      keyframes: {
+        "progress-indeterminate": {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(300%)" },
+        },
+      },
+      animation: {
+        "progress-indeterminate": "progress-indeterminate 1.2s linear infinite",
+      },
     },
   },
   plugins: [require("tailwindcss-animate")],
