@@ -1,14 +1,7 @@
 module.exports = {
   output: 'export',
-  reactStrictMode: false,
+  reactStrictMode: true,
   webpack: (config, { isServer }) => {
-    // Handle WASM modules
-    config.experiments = {
-      ...config.experiments,
-      asyncWebAssembly: true,
-      layers: true,
-    };
-    
     // Fix for optional 'encoding' package used by georaster
     config.resolve = {
       ...config.resolve,

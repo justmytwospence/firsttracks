@@ -1265,7 +1265,7 @@ export default function PathFinderPage() {
           </div>
           <div className="flex items-center justify-center gap-3 mt-1">
             <a 
-              href="https://github.com/justmytwospence/vertfarm" 
+              href="https://github.com/justmytwospence/firsttracks"
               target="_blank" 
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 underline hover:text-foreground transition-colors"

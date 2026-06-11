@@ -19,7 +19,8 @@
     "build:wasm": "cd pathfinder && PATH=$HOME/.cargo/bin:$PATH wasm-pack build --target web --out-dir pkg",
     "dev": "next dev",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "biome check ."
   },
   "engines": {
     "node": ">=22.0.0"

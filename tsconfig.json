@@ -2,7 +2,6 @@
   "compilerOptions": {
     "target": "ES2017",
     "lib": ["dom", "dom.iterable", "esnext"],
-    "allowImportingTsExtensions": true,
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
@@ -31,7 +30,6 @@
     "**/*.tsx",
     "**/*.d.ts",
     "next-env.d.ts",
-    "types/**/*.d.ts",
     ".next/types/**/*.ts",
     "pathfinder/pkg/*.d.ts"
   ],

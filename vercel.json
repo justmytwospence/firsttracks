@@ -1,5 +1,6 @@
 {
-  "installCommand": "npm install -g npm@10 && npm install && curl https://sh.rustup.rs -sSf | sh -s -- -y && PATH=$HOME/.cargo/bin:$PATH rustup target add wasm32-unknown-unknown && PATH=$HOME/.cargo/bin:$PATH cargo install wasm-pack",
+  "installCommand": "npm install && curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --target wasm32-unknown-unknown && npm install -g wasm-pack",
+  "outputDirectory": "out",
   "buildCommand": "PATH=$HOME/.cargo/bin:$PATH npm run build",
   "headers": [
     {

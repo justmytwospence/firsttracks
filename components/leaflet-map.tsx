@@ -126,7 +126,10 @@ export default function LeafletMap(props: LeafletMapProps) {
       doubleClickZoom={props.interactive}
       zoomAnimation={props.interactive}
     >
-      <TileLayer url={`https://tile.jawg.io/jawg-terrain/{z}/{x}/{y}{r}.png?access-token=${process.env.NEXT_PUBLIC_JAWG_ACCESS_TOKEN}`} />
+      <TileLayer
+        url={`https://tile.jawg.io/jawg-terrain/{z}/{x}/{y}{r}.png?access-token=${process.env.NEXT_PUBLIC_JAWG_ACCESS_TOKEN}`}
+        attribution='&copy; <a href="https://jawg.io">Jawg</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      />
       <MapResizeHandler />
       <MapBoundsPersistence />
       {props.interactive && <ZoomControl position="bottomright" />}
