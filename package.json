@@ -17,7 +17,6 @@
   "scripts": {
     "build": "npm run build:wasm && npx next build",
     "build:wasm": "cd pathfinder && PATH=$HOME/.cargo/bin:$PATH wasm-pack build --target web --out-dir pkg",
-    "build:rs": "curl https://sh.rustup.rs -sSf | sh -s -- -y && (cd pathfinder && npm install && PATH=$HOME/.cargo/bin:$PATH npm run build)",
     "dev": "next dev",
     "test": "vitest run",
     "test:watch": "vitest"
