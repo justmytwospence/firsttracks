@@ -348,12 +348,20 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             });
             
             const azimuthsPromise = new Promise<AzimuthData>((resolve, reject) => {
-              const id = `azimuths_${Date.now()}`;
+              const id = `azimuths_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
+              const cleanup = () => {
+                worker.removeEventListener("message", handler);
+                worker.removeEventListener("error", onError);
+              };
+              const onError = (event: ErrorEvent) => {
+                cleanup();
+                reject(new Error(`Pathfinder worker error: ${event.message || "worker failed"}`));
+              };
               const handler = (event: MessageEvent<WorkerResponse>) => {
                 if (event.data.id !== id) return;
 
-                worker.removeEventListener("message", handler);
+                cleanup();
 
                 if (event.data.type === "error") {
                   reject(new Error(event.data.message as string));
@@ -370,6 +378,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               };
 
               worker.addEventListener("message", handler);
+              worker.addEventListener("error", onError);
               worker.postMessage(
                 {
                   type: "compute_azimuths_from_array",
@@ -452,11 +461,19 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         try {
           for (let i = startSegment; i < waypoints.length - 1; i++) {
             const pathPromise = new Promise<string>((resolve, reject) => {
-            const id = `path_${Date.now()}_${i}`;
-            
+            const id = `path_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 11)}`;
+
+            const cleanup = () => {
+              worker.removeEventListener("message", handler);
+              worker.removeEventListener("error", onError);
+            };
+            const onError = (event: ErrorEvent) => {
+              cleanup();
+              reject(new Error(`Pathfinder worker error: ${event.message || "worker failed"}`));
+            };
             const handler = (event: MessageEvent<WorkerResponse>) => {
               if (event.data.id !== id) return;
-              
+
               if (event.data.type === "exploration") {
                 if (currentPathfindingIdRef.current !== sessionId) return;
                 onExplorationUpdate?.({
@@ -469,15 +486,16 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
                   height: event.data.height as number,
                 });
               } else if (event.data.type === "path_result") {
-                worker.removeEventListener("message", handler);
+                cleanup();
                 resolve(event.data.geojson as string);
               } else if (event.data.type === "error") {
-                worker.removeEventListener("message", handler);
+                cleanup();
                 reject(new Error(event.data.message as string));
               }
             };
-            
+
             worker.addEventListener("message", handler);
+            worker.addEventListener("error", onError);
             // Construct fresh buffers per segment so they can be transferred without
             // detaching azimuthData (which is reused for subsequent segments).
             const elevations = new Float32Array(azimuthData.elevations);
@@ -589,7 +607,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         ref={ref}
         className={`${className || "flex-1"} overflow-hidden`}
         onClick={handleClick}
-        disabled={waypoints.length < 2 || !workerReady}
+        disabled={waypoints.length < 2 || !workerReady || isLoading}
       >
         {isLoading ? (
           <>

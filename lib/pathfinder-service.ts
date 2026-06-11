@@ -47,6 +47,7 @@ class PathfinderService {
   private worker: Worker | null = null;
   private workerReady = false;
   private initPromise: Promise<void> | null = null;
+  private pendingRejects = new Map<string, (err: Error) => void>();
 
   /**
    * Initialize the worker if not already initialized
@@ -61,6 +62,16 @@ class PathfinderService {
           new URL('../workers/pathfinder.worker.ts', import.meta.url),
           { type: 'module' }
         );
+        // A module worker that fails to load/parse (or whose WASM import
+        // fails) reports it via an async 'error' event; without these
+        // listeners every pending request would hang forever.
+        this.worker.addEventListener('error', (event) => {
+          console.error('[PathfinderService] Worker error:', event.message);
+          this.failPending(new Error(`Pathfinder worker error: ${event.message || 'worker failed to load'}`));
+        });
+        this.worker.addEventListener('messageerror', () => {
+          this.failPending(new Error('Pathfinder worker message could not be deserialized'));
+        });
         this.workerReady = true;
         console.log('[PathfinderService] Worker initialized');
         resolve();
@@ -71,6 +82,16 @@ class PathfinderService {
     });
 
     return this.initPromise;
+  }
+
+  /**
+   * Reject every in-flight request (worker died or can't deliver messages).
+   */
+  private failPending(err: Error): void {
+    for (const reject of this.pendingRejects.values()) {
+      reject(err);
+    }
+    this.pendingRejects.clear();
   }
 
   /**
@@ -87,13 +108,23 @@ class PathfinderService {
       throw new Error('Worker not initialized');
     }
 
-    const id = `azimuths_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const id = `azimuths_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
     return new Promise<AzimuthData>((resolve, reject) => {
+      const worker = this.worker;
+      if (!worker) {
+        reject(new Error('Worker not available'));
+        return;
+      }
+
+      const settle = () => {
+        worker.removeEventListener('message', handler);
+        this.pendingRejects.delete(id);
+      };
       const handler = (event: MessageEvent<WorkerResponse>) => {
         if (event.data.id !== id) return;
 
-        this.worker?.removeEventListener('message', handler);
+        settle();
 
         if (event.data.type === 'error') {
           reject(new Error((event.data as ErrorResult).message));
@@ -110,12 +141,10 @@ class PathfinderService {
           });
         }
       };
-
-      const worker = this.worker;
-      if (!worker) {
-        reject(new Error('Worker not available'));
-        return;
-      }
+      this.pendingRejects.set(id, (err) => {
+        settle();
+        reject(err);
+      });
 
       worker.addEventListener('message', handler);
 
@@ -156,13 +185,23 @@ class PathfinderService {
       throw new Error('Worker not initialized');
     }
 
-    const id = `compute_runout_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const id = `compute_runout_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
     return new Promise<Float32Array>((resolve, reject) => {
+      const worker = this.worker;
+      if (!worker) {
+        reject(new Error('Worker not available'));
+        return;
+      }
+
+      const settle = () => {
+        worker.removeEventListener('message', handler);
+        this.pendingRejects.delete(id);
+      };
       const handler = (event: MessageEvent) => {
         if (event.data.id !== id) return;
 
-        this.worker?.removeEventListener('message', handler);
+        settle();
 
         if (event.data.type === 'error') {
           reject(new Error(event.data.message));
@@ -170,12 +209,10 @@ class PathfinderService {
           resolve(event.data.runout_zones);
         }
       };
-
-      const worker = this.worker;
-      if (!worker) {
-        reject(new Error('Worker not available'));
-        return;
-      }
+      this.pendingRejects.set(id, (err) => {
+        settle();
+        reject(err);
+      });
 
       worker.addEventListener('message', handler);
 
@@ -218,6 +255,7 @@ class PathfinderService {
       this.worker = null;
       this.workerReady = false;
       this.initPromise = null;
+      this.failPending(new Error('Pathfinder worker terminated'));
     }
   }
 }
