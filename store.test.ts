@@ -147,22 +147,29 @@ describe("aspectStore", () => {
 });
 
 describe("slopeUnitStore", () => {
-  it("initializes with useDegrees as false", () => {
-    const store = createSlopeUnitStore();
-    expect(store.getState().useDegrees).toBe(false);
+  // Every createSlopeUnitStore() instance rehydrates from the same
+  // localStorage persist key, so clear it to keep tests independent.
+  // (localStorage may be absent in the test environment.)
+  beforeEach(() => {
+    window.localStorage?.removeItem("pathfinder-slope-unit");
   });
 
-  it("updates useDegrees when setUseDegrees is called with true", () => {
+  it("initializes with useDegrees as true", () => {
     const store = createSlopeUnitStore();
-    store.getState().setUseDegrees(true);
     expect(store.getState().useDegrees).toBe(true);
   });
 
   it("updates useDegrees when setUseDegrees is called with false", () => {
     const store = createSlopeUnitStore();
-    store.getState().setUseDegrees(true);
     store.getState().setUseDegrees(false);
     expect(store.getState().useDegrees).toBe(false);
+  });
+
+  it("updates useDegrees when setUseDegrees is called with true", () => {
+    const store = createSlopeUnitStore();
+    store.getState().setUseDegrees(false);
+    store.getState().setUseDegrees(true);
+    expect(store.getState().useDegrees).toBe(true);
   });
 
   it("toggles value correctly", () => {
