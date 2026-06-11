@@ -21,16 +21,10 @@ web-sys = { version = "0.3", features = ["console"] }
 lto = true
 strip = "symbols"
 
-# Modern rustc emits bulk-memory/sign-ext/etc. by default; wasm-pack's bundled
-# binaryen rejects them unless the features are enabled explicitly (this is
-# why wasm-opt used to be disabled outright).
+# wasm-opt is disabled: enabling it requires --enable-* feature flags matched
+# to the local binaryen version, and Vercel's wasm-pack ships a different
+# binaryen that rejected them, failing the deploy. Off is the proven-deployable
+# state (lto + strip already shrink the binary). Revisit only with a binaryen
+# version pinned across local and CI.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = [
-  "-O3",
-  "--enable-bulk-memory",
-  "--enable-nontrapping-float-to-int",
-  "--enable-sign-ext",
-  "--enable-mutable-globals",
-  "--enable-reference-types",
-  "--enable-multivalue",
-]
+wasm-opt = false
