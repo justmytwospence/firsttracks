@@ -474,6 +474,14 @@ export default function PathFinderPage() {
           data.bounds,
           excludedAspects
         );
+        // If a new region's bundle replaced the ref while runout was in
+        // flight, writing back would revert it to the old region's bands.
+        // Drop this result and let the next toggle recompute for the new
+        // bundle.
+        if (currentAzimuthDataRef.current !== data) {
+          lastRunoutAspectsKeyRef.current = null;
+          return;
+        }
         // Update the cached bundle so subsequent toggles compare against the latest runout.
         currentAzimuthDataRef.current = { ...data, runout_zones: newRunoutZones };
         handleSetAspectRaster(
