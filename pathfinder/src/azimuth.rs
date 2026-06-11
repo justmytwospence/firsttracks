@@ -254,12 +254,16 @@ pub fn compute_sobel_flat(
           gy += pixel_value * GY_KERNEL[k_row + kj];
         }
       }
-      let azimuth = calculate_azimuth(gx, gy);
+      // Normalize per-axis BEFORE computing the direction: with anisotropic
+      // pixels (degree rasters: px_x = px_y * cos(lat)) the raw kernel sums
+      // are scaled differently per axis, which would skew azimuths toward
+      // the N-S axis (~11 degrees at 47N for a true 45-degree aspect).
+      let gx_n = gx * inv_norm_x;
+      let gy_n = gy * inv_norm_y;
+      let azimuth = calculate_azimuth(gx_n, gy_n);
       let out_idx = row_out + j;
       azimuths[out_idx] = azimuth as f32;
       if azimuth >= 0.0 {
-        let gx_n = gx * inv_norm_x;
-        let gy_n = gy * inv_norm_y;
         gradients[out_idx] = ((gx_n * gx_n) + (gy_n * gy_n)).sqrt() as f32;
       }
     }
@@ -646,6 +650,29 @@ mod tests {
       "expected azimuth ≈ 270, got {}", azimuths[centre]);
     assert!((gradients[centre] as f64 - slope).abs() < 1e-3,
       "expected gradient ≈ {}, got {}", slope, gradients[centre]);
+  }
+
+  #[test]
+  fn sobel_azimuth_correct_with_anisotropic_pixels() {
+    // Plane rising equally (in meters) toward east and south: descent faces
+    // northwest, azimuth 315. With px_x != px_y the per-axis normalization
+    // must happen before the direction is computed, not just the magnitude.
+    let (width, height) = (15, 15);
+    let (px_x, px_y) = (7.0, 10.0);
+    let slope = (20.0_f64).to_radians().tan();
+    let mut elev = vec![0.0f32; width * height];
+    for i in 0..height {
+      for j in 0..width {
+        elev[i * width + j] = (slope * (j as f64 * px_x + i as f64 * px_y)) as f32;
+      }
+    }
+    let (azimuths, gradients) = compute_sobel_flat(&elev, width, height, px_x, px_y);
+    let centre = 7 * width + 7;
+    assert!((azimuths[centre] as f64 - 315.0).abs() < 1.0,
+      "expected azimuth ~ 315, got {}", azimuths[centre]);
+    let expected_gradient = slope * (2.0_f64).sqrt();
+    assert!((gradients[centre] as f64 - expected_gradient).abs() < 1e-3,
+      "expected gradient ~ {}, got {}", expected_gradient, gradients[centre]);
   }
 
   #[test]
