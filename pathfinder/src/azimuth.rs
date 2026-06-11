@@ -309,10 +309,25 @@ const MAX_RUNOUT_CELLS: usize = 50;
 const INITIAL_INTENSITY: f32 = 1.0;
 const DECAY_RATE: f32 = 0.92;
 const SPREAD_ITERATIONS: usize = 2;
-const SPREAD_DECAY: f32 = 0.7;
+const SPREAD_DECAY: f32 = 0.5;
 const TERMINATE_BELOW: f32 = 0.05;
 /// Width of the gradient blend zone (10°-20°) where source-zone edge intensity fades in.
 const BLEND_RANGE: f32 = 0.35 - START_ZONE_THRESHOLD;
+/// Intensity painted onto source cells themselves once fully blended in.
+/// Deliberately below RUNOUT_BLOCK: whether a steep excluded-aspect cell is
+/// traversable is the aspect rule's call (user-tunable threshold), not runout's.
+const SOURCE_EDGE_INTENSITY: f32 = 0.45;
+
+/// At or above this intensity the pathfinder rejects the cell outright; below
+/// it the cell is traversable with a graduated cost penalty.
+///
+/// Invariants (covered by tests):
+/// - Flow-chain cells (INITIAL_INTENSITY decaying by DECAY_RATE) start blocked:
+///   these are the avalanche channel itself.
+/// - Lateral spread (chain * SPREAD_DECAY) stays BELOW the block threshold:
+///   the ring around a channel is penalized, never hard-blocked.
+/// - Source-cell shading (<= SOURCE_EDGE_INTENSITY) stays below the threshold.
+pub const RUNOUT_BLOCK: f32 = 0.5;
 
 /// Propagate runout intensity downhill from each excluded-aspect source cell
 /// using D8 flow, then apply lateral spreading. Operates in place on `runout`.
@@ -336,14 +351,13 @@ fn propagate_runout(
         continue;
       }
 
-      // Edge blending: cells just past the threshold get a low fade-in intensity
-      // so the runout overlay smoothly meets the red aspect shading.
-      let g = gradients[flat_idx];
-      let above = g - START_ZONE_THRESHOLD;
-      if above < BLEND_RANGE {
-        let blend = 1.0 - (above / BLEND_RANGE);
-        runout[flat_idx] = runout[flat_idx].max(blend * 0.5);
-      }
+      // Edge blending: intensity fades IN with steepness across the 10°-20°
+      // blend zone (near zero just past the threshold, SOURCE_EDGE_INTENSITY
+      // from 20° up), so the overlay ramps smoothly into the red aspect
+      // shading and gentle slopes are never hard-blocked by their own shading.
+      let above = gradients[flat_idx] - START_ZONE_THRESHOLD;
+      let blend = (above / BLEND_RANGE).min(1.0);
+      runout[flat_idx] = runout[flat_idx].max(blend * SOURCE_EDGE_INTENSITY);
 
       // Walk down the D8 flow chain, decaying intensity each step.
       let mut current_y = i;
@@ -692,6 +706,77 @@ mod tests {
     let flow = compute_d8_flow_directions_flat(&elev, 5, 5);
     // Centre cell descends east (dir 2).
     assert_eq!(flow[2 * 5 + 2], 2);
+  }
+
+  #[test]
+  fn runout_constants_keep_lateral_spread_and_source_shading_traversable() {
+    // The avalanche channel itself (chain cells) must start blocked...
+    assert!(INITIAL_INTENSITY * DECAY_RATE >= RUNOUT_BLOCK);
+    // ...but the first lateral ring and source-cell shading must not be.
+    assert!(INITIAL_INTENSITY * DECAY_RATE * SPREAD_DECAY < RUNOUT_BLOCK);
+    assert!(SOURCE_EDGE_INTENSITY < RUNOUT_BLOCK);
+  }
+
+  #[test]
+  fn gentle_source_cells_get_near_zero_runout() {
+    // A cell barely past the 10-degree source threshold used to receive
+    // maximum blend (exactly RUNOUT_BLOCK) and was deterministically blocked.
+    let n = 5 * 5;
+    let gradients = vec![START_ZONE_THRESHOLD + 0.001; n];
+    let is_excluded = vec![true; n];
+    let flow_dir = vec![255u8; n];
+    let mut runout = vec![0.0f32; n];
+    let mut spread = vec![0.0f32; n];
+    propagate_runout(&mut runout, &mut spread, &gradients, &is_excluded, &flow_dir, 5, 5);
+    for &v in &runout {
+      assert!(v < 0.05, "gentle source cell should get near-zero runout, got {}", v);
+    }
+  }
+
+  #[test]
+  fn steep_source_cells_capped_below_block_threshold() {
+    let n = 5 * 5;
+    let gradients = vec![0.6f32; n]; // well past the blend zone
+    let is_excluded = vec![true; n];
+    let flow_dir = vec![255u8; n];
+    let mut runout = vec![0.0f32; n];
+    let mut spread = vec![0.0f32; n];
+    propagate_runout(&mut runout, &mut spread, &gradients, &is_excluded, &flow_dir, 5, 5);
+    let centre = 2 * 5 + 2;
+    assert!((runout[centre] - SOURCE_EDGE_INTENSITY).abs() < 1e-6);
+    assert!(runout[centre] < RUNOUT_BLOCK);
+  }
+
+  #[test]
+  fn flow_chain_blocked_but_lateral_ring_traversable() {
+    // Single steep source at (3,3) flowing east two cells. The chain is the
+    // avalanche channel (blocked); everything beside it stays below the
+    // block threshold.
+    let (width, height) = (7, 7);
+    let n = width * height;
+    let mut gradients = vec![0.0f32; n];
+    let mut is_excluded = vec![false; n];
+    let mut flow_dir = vec![255u8; n];
+    let src = 3 * width + 3;
+    gradients[src] = 0.6;
+    is_excluded[src] = true;
+    flow_dir[src] = 2; // east
+    flow_dir[3 * width + 4] = 2; // east
+    let mut runout = vec![0.0f32; n];
+    let mut spread = vec![0.0f32; n];
+    propagate_runout(&mut runout, &mut spread, &gradients, &is_excluded, &flow_dir, width, height);
+
+    let chain = [3 * width + 4, 3 * width + 5];
+    for &c in &chain {
+      assert!(runout[c] >= RUNOUT_BLOCK, "chain cell should be blocked, got {}", runout[c]);
+    }
+    for i in 0..n {
+      if i == src || chain.contains(&i) {
+        continue;
+      }
+      assert!(runout[i] < RUNOUT_BLOCK,
+        "non-chain cell {} should stay traversable, got {}", i, runout[i]);
+    }
   }
 
   #[test]

@@ -5,7 +5,7 @@ use js_sys::Function;
 use pathfinding::directed::fringe::fringe;
 use wasm_bindgen::prelude::*;
 
-use crate::azimuth::{deg_pixel_to_meters, Aspect, ASPECT_TOLERANCE_DEG};
+use crate::azimuth::{deg_pixel_to_meters, Aspect, ASPECT_TOLERANCE_DEG, RUNOUT_BLOCK};
 
 fn parse_point_to_coordinate(point_str: &str) -> Result<(f64, f64), JsValue> {
   let geojson = GeoJson::from_json_value(
@@ -67,11 +67,9 @@ fn exponential_multiplier(x: f64) -> f64 {
   E.powf(M * (x - B)) + 1.0
 }
 
-/// Below this runout intensity we apply only a graduated cost penalty; at or
-/// above this, the cell is rejected entirely. Tuned so that lateral spread
-/// (≤ 0.49 in two iterations of 0.7×) remains traversable but high-confidence
-/// runout (initial 1.0, decaying along the flow) is blocked.
-const RUNOUT_BLOCK: f32 = 0.5;
+// RUNOUT_BLOCK (imported from azimuth) splits runout intensity into a
+// graduated cost penalty below it and an outright rejection at or above it.
+// The intensity constants live together in azimuth.rs with the invariants.
 const RUNOUT_PENALTY_SCALE: f64 = 10.0;
 
 /// Edge cost = base distance × gradient multiplier × runout penalty (u32).
