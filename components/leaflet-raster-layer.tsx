@@ -335,14 +335,26 @@ export default function LeafletRasterLayer({
   const map = useMap();
   const layerRef = useRef<SmoothRasterOverlay | null>(null);
 
+  // Create/destroy only when the raster itself (or map) changes. Aspect and
+  // runout toggles are applied in place by the effects below — including them
+  // here tore the whole layer down (with its 300 ms fade) on every toggle.
+  const initialAspectsRef = useRef(excludedAspects);
+  initialAspectsRef.current = excludedAspects;
+  const initialRunoutRef = useRef(avoidRunoutZones);
+  initialRunoutRef.current = avoidRunoutZones;
+
   useEffect(() => {
-    layerRef.current = new SmoothRasterOverlay(aspectRaster, excludedAspects, avoidRunoutZones);
+    layerRef.current = new SmoothRasterOverlay(
+      aspectRaster,
+      initialAspectsRef.current,
+      initialRunoutRef.current,
+    );
     layerRef.current.addTo(map);
 
     return () => {
       layerRef.current?.remove();
     };
-  }, [aspectRaster, map, excludedAspects, avoidRunoutZones]);
+  }, [aspectRaster, map]);
 
   // Update excluded aspects without recreating the layer
   useEffect(() => {

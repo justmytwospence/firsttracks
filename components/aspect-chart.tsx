@@ -175,9 +175,10 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
     <div 
       className="w-full h-full flex items-center justify-center"
       onMouseLeave={() => {
-        if (!isAspectLocked) {
-          setHoveredAspect(null);
-        }
+        // Always release the click-lock on leave (mirrors the CDF chart) —
+        // otherwise one click froze aspect hovering until remount.
+        setIsAspectLocked(false);
+        setHoveredAspect(null);
       }}
     >
       <PolarArea data={chartData} options={options} />

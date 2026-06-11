@@ -138,16 +138,18 @@ export default function GeoJsonInteractionLayer({
 
   // Set up event listeners
   useEffect(() => {
+    const handleMouseOut = () => setHoverIndex(-1);
     map.on("mousemove", handleMouseMove);
-    map.on("mouseout", () => setHoverIndex(-1));
+    map.on("mouseout", handleMouseOut);
     if (onPathClick) {
       map.on("click", handlePathClick);
     }
 
-    // Cleanup event listeners
+    // Cleanup event listeners (always pass the handler — a bare off()
+    // would strip every other layer's listeners for that event too)
     return () => {
       map.off("mousemove", handleMouseMove);
-      map.off("mouseout");
+      map.off("mouseout", handleMouseOut);
       map.off("click", handlePathClick);
     };
   }, [map, handleMouseMove, handlePathClick, onPathClick, setHoverIndex]);
