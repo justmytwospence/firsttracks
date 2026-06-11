@@ -46,7 +46,9 @@ const CHART_COLORS = ["#3b82f6", "#64748b", "#f43f5e"];
 export default function GradientCdfChart({ mappables }: { mappables: Mappable[] }) {
   const chartRef = useRef<ChartJS<"bar" | "line">>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { setHoveredGradient } = gradientStore();
+  // Selector keeps this chart from re-rendering on its own per-mousemove
+  // hoveredGradient writes.
+  const setHoveredGradient = gradientStore((s) => s.setHoveredGradient);
   const [isGradientLocked, setIsGradientLocked] = useState(false);
   const useDegrees = slopeUnitStore((s) => s.useDegrees);
 
@@ -82,8 +84,11 @@ export default function GradientCdfChart({ mappables }: { mappables: Mappable[] 
       flexContainer = flexContainer.parentElement;
     }
 
-    // Handle any transition end (captures sidebar width transition)
-    const handleTransitionEnd = () => {
+    // Handle layout transitions (sidebar width); filtering by property keeps
+    // every transition-colors hover in the document from scheduling resizes.
+    const LAYOUT_PROPS = new Set(['width', 'height', 'flex-basis', 'transform', 'left', 'right']);
+    const handleTransitionEnd = (e: TransitionEvent) => {
+      if (!LAYOUT_PROPS.has(e.propertyName)) return;
       // Multiple delayed resizes to ensure layout has settled
       resizeChart();
       setTimeout(resizeChart, 50);

@@ -1,14 +1,11 @@
 import type { Aspect } from "@/components/find-path-button";
 import { computeGradient } from "@/lib/geo/geo";
 import type { HoverIndexStore } from "@/store";
-import {
-  aspectStore,
-  hoverIndexStore as defaultHoverIndexStore,
-} from "@/store";
-import type { Feature, FeatureCollection, LineString, Point } from "geojson";
+import { hoverIndexStore as defaultHoverIndexStore } from "@/store";
+import type { FeatureCollection, LineString, Point } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useMap } from "react-leaflet";
 import GeoJSONInteractionLayer from "./leaflet-geojson-interactive-layer";
 
@@ -31,8 +28,9 @@ export default function GeoJSONLayer({
 }: GeoJSONLayerProps) {
   const map = useMap();
   const geoJsonRef = useRef<L.GeoJSON | null>(null);
-  const hoverMarkerRef = useRef<L.Marker | null>(null);
-  const { hoveredAspect } = aspectStore();
+  // Fit the viewport only when a path first appears: refitting on every
+  // appended segment yanked the map around during multi-segment pathfinding.
+  const hasFitRef = useRef(false);
 
   // Memoize features to prevent unnecessary recalculations
   const features = useMemo(() => {
@@ -76,29 +74,31 @@ export default function GeoJSONLayer({
 
     // Fade in animation
     let opacity = 0;
+    let rafId = 0;
     const fadeIn = () => {
       opacity += 0.05;
       if (opacity >= 1) {
         geoJsonRef.current?.setStyle({ opacity: 1 });
       } else {
         geoJsonRef.current?.setStyle({ opacity });
-        requestAnimationFrame(fadeIn);
+        rafId = requestAnimationFrame(fadeIn);
       }
     };
-    requestAnimationFrame(fadeIn);
+    rafId = requestAnimationFrame(fadeIn);
 
-    // Center and zoom the map to fit the GeoJSON layer
-    if (geoJsonRef.current) {
+    // Center and zoom the map only when the path first appears
+    if (!hasFitRef.current && geoJsonRef.current) {
       const bounds = geoJsonRef.current.getBounds();
-      if (bounds.isValid()) { 
+      if (bounds.isValid()) {
         map.fitBounds(bounds, { padding: [30, 30], animate: interactive });
+        hasFitRef.current = true;
       }
     }
 
     // geoJSON cleanup
     return () => {
+      cancelAnimationFrame(rafId);
       geoJsonRef.current?.remove();
-      hoverMarkerRef.current?.remove();
     };
   }, [features, map, interactive, polyline]); // Updated dependencies
 

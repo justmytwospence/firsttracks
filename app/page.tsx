@@ -196,11 +196,21 @@ export default function PathFinderPage() {
   // Keyboard shortcut: Cmd+Enter to find path, Cmd+Z to undo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Leave text editing alone: intercepting undo inside an input (e.g.
+      // the GPX export filename) would kill native text undo and silently
+      // remove a waypoint instead.
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
         findPathRef.current?.click();
       }
-      if ((e.metaKey || e.ctrlKey) && e.key === "z") {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "z") {
         e.preventDefault();
         handleUndo();
       }

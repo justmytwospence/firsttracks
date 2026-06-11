@@ -1,13 +1,8 @@
 import type { Aspect } from "@/components/find-path-button";
 import { computeGradient } from "@/lib/geo/geo";
 import type { HoverIndexStore } from "@/store";
-import {
-  aspectStore,
-  createHoverIndexStore,
-  hoverIndexStore as defaultHoverIndexStore,
-  gradientStore,
-} from "@/store";
-import type { Feature, FeatureCollection, LineString, Point } from "geojson";
+import { aspectStore, gradientStore } from "@/store";
+import type { LineString, Point } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useCallback, useEffect, useRef } from "react";
@@ -30,9 +25,10 @@ export default function GeoJsonInteractionLayer({
 }: GeoJsonInteractionLayerProps) {
   const map = useMap();
   const hoverMarkerRef = useRef<L.Marker | null>(null);
-  const { setHoverIndex } = hoverIndexStore();
-  const { hoveredGradient } = gradientStore();
-  const { hoveredAspect } = aspectStore();
+  // Selector only — the highlight values are consumed via imperative
+  // subscriptions below, so whole-store reads just caused wasted re-renders
+  // on every mousemove.
+  const setHoverIndex = hoverIndexStore((s) => s.setHoverIndex);
 
   // Find the closest point on the path and corresponding segment index
   const findClosestPointOnPath = useCallback(

@@ -35,6 +35,10 @@ export default function LocationSearch({
   const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
 
   useEffect(() => {
+    // Abort any in-flight request when the query changes — otherwise a slow
+    // older response could overwrite newer results.
+    const controller = new AbortController();
+
     const searchPlaces = async () => {
       if (search.length < 3) {
         setResults([]);
@@ -43,24 +47,26 @@ export default function LocationSearch({
       }
 
       try {
+        // Browsers forbid setting User-Agent from JS; Nominatim identifies
+        // browser clients via the Referer header instead.
         const response = await fetch(
           `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
             search
           )}`,
           {
-            headers: {
-              Accept: "application/json",
-              "User-Agent": "PathFinderApp/1.0", // Required by Nominatim usage policy
-            },
+            headers: { Accept: "application/json" },
+            signal: controller.signal,
           }
         );
 
         if (response.ok) {
           const data = await response.json();
           setResults(data.slice(0, 5)); // Limit to top 5 results
+          setHighlightedIndex(-1);
           setOpen(data.length > 0); // Open Popover if there are results
         }
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
         console.error("Search error:", error);
         setResults([]);
         setOpen(false); // Close Popover on error
@@ -68,10 +74,13 @@ export default function LocationSearch({
     };
 
     const debounce = setTimeout(searchPlaces, 1000); // 1 second delay to comply with usage policy
-    return () => clearTimeout(debounce);
+    return () => {
+      clearTimeout(debounce);
+      controller.abort();
+    };
   }, [search]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlightedIndex((prev) =>
@@ -115,8 +124,10 @@ export default function LocationSearch({
             <Search className="h-4 w-4 text-muted-foreground shrink-0" />
             <input
               placeholder="Search locations..."
+              aria-label="Search locations"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={handleKeyDown}
               className="w-full bg-transparent border-none outline-none min-w-0 cursor-text"
             />
           </div>
@@ -124,7 +135,7 @@ export default function LocationSearch({
         <PopoverContent
           className="w-[var(--radix-popover-trigger-width)] p-0"
           align="start"
-          onKeyDown={handleKeyDown}
+          onOpenAutoFocus={(e) => e.preventDefault()}
           tabIndex={-1}
         >
           <Command>
@@ -132,7 +143,7 @@ export default function LocationSearch({
               <CommandGroup>
                 {results.map((result, index) => (
                   <CommandItem
-                    key={result.display_name}
+                    key={`${result.display_name}-${result.lat}-${result.lon}`}
                     onSelect={() => {
                       onLocationSelect([
                         Number.parseFloat(result.lat),

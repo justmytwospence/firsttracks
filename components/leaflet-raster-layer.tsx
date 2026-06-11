@@ -252,19 +252,20 @@ class SmoothRasterOverlay extends L.Layer {
     // Get map bounds in geographic coordinates
     const west = bounds.getWest();
     const east = bounds.getEast();
-    const north = bounds.getNorth();
-    const south = bounds.getSouth();
 
     // Create ImageData for pixel manipulation
     const imageData = ctx.createImageData(size.x, size.y);
     const data = imageData.data;
 
-    // Render each screen pixel
+    // Render each screen pixel. Longitude is linear in screen x under Web
+    // Mercator, but latitude is NOT linear in screen y — interpolating it
+    // linearly drifted the overlay vertically against the basemap, worse at
+    // low zoom. Unproject the latitude per row instead.
     for (let screenY = 0; screenY < size.y; screenY++) {
+      const lat = map.containerPointToLatLng(L.point(0, screenY)).lat;
       for (let screenX = 0; screenX < size.x; screenX++) {
         // Convert screen coordinates to geographic coordinates
         const lng = west + (screenX / size.x) * (east - west);
-        const lat = north - (screenY / size.y) * (north - south);
 
         // Convert geographic coordinates to raster pixel coordinates
         const rasterX = (lng - xmin) / pixelWidth;

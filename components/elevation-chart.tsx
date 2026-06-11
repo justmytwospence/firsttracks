@@ -42,8 +42,12 @@ export default function ElevationChart({
 }) {
   const chartRef = useRef<ChartJS<"line">>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { setHoverIndex } = hoverIndexStore();
-  const { hoveredGradient, gradientHighlightMode } = gradientStore();
+  // Select narrowly: subscribing to the whole hover store re-rendered the
+  // chart on every mousemove; the imperative subscription below already
+  // syncs highlighting without a React render.
+  const setHoverIndex = hoverIndexStore((s) => s.setHoverIndex);
+  const hoveredGradient = gradientStore((s) => s.hoveredGradient);
+  const gradientHighlightMode = gradientStore((s) => s.gradientHighlightMode);
   const useDegrees = slopeUnitStore((s) => s.useDegrees);
 
   // Resize chart when container size changes (e.g., sidebar toggle)
@@ -76,8 +80,11 @@ export default function ElevationChart({
       flexContainer = flexContainer.parentElement;
     }
 
-    // Handle any transition end (captures sidebar width transition)
-    const handleTransitionEnd = () => {
+    // Handle layout transitions (sidebar width); filtering by property keeps
+    // every transition-colors hover in the document from scheduling resizes.
+    const LAYOUT_PROPS = new Set(['width', 'height', 'flex-basis', 'transform', 'left', 'right']);
+    const handleTransitionEnd = (e: TransitionEvent) => {
+      if (!LAYOUT_PROPS.has(e.propertyName)) return;
       // Multiple delayed resizes to ensure layout has settled
       resizeChart();
       setTimeout(resizeChart, 50);

@@ -80,8 +80,12 @@ function MapResizeHandler() {
       parent = parent.parentElement;
     }
 
-    // Handle transition end events on ancestors (for sidebar/dock animations)
-    const handleTransitionEnd = () => {
+    // Handle transition end events on ancestors (for sidebar/dock animations).
+    // Only layout-affecting properties matter — without the filter every
+    // transition-colors button hover in the document triggered a resize.
+    const LAYOUT_PROPS = new Set(['width', 'height', 'flex-basis', 'transform', 'left', 'right']);
+    const handleTransitionEnd = (e: TransitionEvent) => {
+      if (!LAYOUT_PROPS.has(e.propertyName)) return;
       map.invalidateSize();
     };
 
