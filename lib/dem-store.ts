@@ -337,6 +337,34 @@ export async function getCachedIndividualTilesBounds(): Promise<Bounds | null> {
 }
 
 /**
+ * Stitch decoded tiles (each TERRAIN_TILE_SIZE square, positioned at grid tile
+ * coords x/y) into one row-major elevation grid. Slippy tiles don't share edge
+ * samples, so tiles abut with no seam overlap. Pure — extracted for testing.
+ */
+export function stitchTiles(
+  tiles: { x: number; y: number; data: Float32Array }[],
+  tilesWide: number,
+  tilesHigh: number,
+): { data: Float32Array; width: number; height: number } {
+  const gridWidth = tilesWide * TERRAIN_TILE_SIZE;
+  const gridHeight = tilesHigh * TERRAIN_TILE_SIZE;
+  const stitched = new Float32Array(gridWidth * gridHeight);
+
+  for (const tile of tiles) {
+    const offsetX = tile.x * TERRAIN_TILE_SIZE;
+    const offsetY = tile.y * TERRAIN_TILE_SIZE;
+
+    for (let row = 0; row < TERRAIN_TILE_SIZE; row++) {
+      const srcStart = row * TERRAIN_TILE_SIZE;
+      const dstStart = (offsetY + row) * gridWidth + offsetX;
+      stitched.set(tile.data.subarray(srcStart, srcStart + TERRAIN_TILE_SIZE), dstStart);
+    }
+  }
+
+  return { data: stitched, width: gridWidth, height: gridHeight };
+}
+
+/**
  * Fetch DEM data from AWS Terrain Tiles and stitch into a single elevation grid.
  * Uses individual tile caching - only fetches tiles that aren't already cached.
  */
@@ -380,23 +408,14 @@ async function fetchDEM(
   );
   
   const tileResults = await Promise.all(tilePromises);
-  
+
   // Stitch tiles into single grid
-  const gridWidth = tilesWide * TERRAIN_TILE_SIZE;
-  const gridHeight = tilesHigh * TERRAIN_TILE_SIZE;
-  const stitched = new Float32Array(gridWidth * gridHeight);
-  
-  for (const tile of tileResults) {
-    const offsetX = tile.x * TERRAIN_TILE_SIZE;
-    const offsetY = tile.y * TERRAIN_TILE_SIZE;
-    
-    for (let row = 0; row < TERRAIN_TILE_SIZE; row++) {
-      const srcStart = row * TERRAIN_TILE_SIZE;
-      const dstStart = (offsetY + row) * gridWidth + offsetX;
-      stitched.set(tile.data.subarray(srcStart, srcStart + TERRAIN_TILE_SIZE), dstStart);
-    }
-  }
-  
+  const { data: stitched, width: gridWidth, height: gridHeight } = stitchTiles(
+    tileResults,
+    tilesWide,
+    tilesHigh,
+  );
+
   // Calculate actual bounds of the stitched grid
   const nwCorner = tileToLatLng(minX, minY, zoom);
   const seCorner = tileToLatLng(maxX + 1, maxY + 1, zoom);
