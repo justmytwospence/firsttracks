@@ -322,17 +322,20 @@ async function cacheTile(grid: ElevationGrid): Promise<void> {
       height: grid.height,
       timestamp: Date.now(),
     };
-    
-    return new Promise((resolve, reject) => {
+
+    await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
-      const request = store.put(tile);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
+      store.put(tile);
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
     });
-  } catch {
-    // Caching failed, but that's okay
+  } catch (error) {
+    // Cache writes are best-effort: a quota/transaction failure must not
+    // abort the operation that produced the data.
+    console.warn('[DEM Cache] Failed to cache stitched grid:', error);
   }
 }
 
@@ -419,17 +422,20 @@ async function cacheIndividualTile(z: number, x: number, y: number, data: Float3
       data: data.buffer as ArrayBuffer,
       timestamp: Date.now(),
     };
-    
-    return new Promise((resolve, reject) => {
+
+    await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(INDIVIDUAL_TILES_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(INDIVIDUAL_TILES_STORE_NAME);
-      const request = store.put(cached);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
+      store.put(cached);
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
     });
-  } catch {
-    // Caching failed, but that's okay
+  } catch (error) {
+    // Cache writes are best-effort: a quota/transaction failure must not
+    // abort the operation that produced the data.
+    console.warn('[DEM Cache] Failed to cache tile:', error);
   }
 }
 
@@ -1225,7 +1231,11 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excluded
 
     const cached: CachedAzimuths = {
       key,
-      bounds: normalizedBounds,
+      // Store the TRUE bounds as the raster's geo-transform; the rounded
+      // normalizedBounds is only the lookup key. Storing rounded bounds
+      // (~55 m of error) shifted the overlay and the A* origin by several
+      // pixels after a cache round-trip.
+      bounds,
       elevations: elevationsCopy.buffer,
       azimuths: azimuthsCopy.buffer,
       gradients: gradientsCopy.buffer,
@@ -1235,16 +1245,19 @@ export async function cacheAzimuths(bounds: Bounds, data: AzimuthData, _excluded
       timestamp: Date.now(),
     };
 
-    return new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const transaction = db.transaction(AZIMUTHS_STORE_NAME, 'readwrite');
       const store = transaction.objectStore(AZIMUTHS_STORE_NAME);
-      const request = store.put(cached);
+      store.put(cached);
 
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => resolve();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
     });
   } catch (error) {
-    console.error('[Azimuth Cache] Failed to cache azimuths:', error);
+    // Cache writes are best-effort: a quota/transaction failure must not
+    // abort the operation that produced the data.
+    console.warn('[Azimuth Cache] Failed to cache azimuths:', error);
   }
 }
 
