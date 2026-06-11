@@ -199,11 +199,7 @@ pub fn find_path_rs(
   _exploration_batch_size: Option<usize>,
 ) -> Result<String, JsValue> {
   let max_gradient: f64 = max_gradient.unwrap_or(1.0);
-  let excluded_aspects: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
-    vec![]
-  } else {
-    serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
-  };
+  let excluded_aspects: Vec<Aspect> = crate::azimuth::parse_excluded_aspects(excluded_aspects)?;
   let aspect_gradient_threshold: f64 = aspect_gradient_threshold.unwrap_or(0.0);
 
   let width_us: usize = width as usize;

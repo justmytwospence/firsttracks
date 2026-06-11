@@ -161,6 +161,17 @@ impl Aspect {
 
 }
 
+/// Parse a JS excluded-aspects array. A malformed list is a hard error:
+/// silently dropping exclusions would route through terrain the user asked
+/// to avoid.
+pub fn parse_excluded_aspects(value: JsValue) -> Result<Vec<Aspect>, JsValue> {
+  if value.is_undefined() || value.is_null() {
+    return Ok(vec![]);
+  }
+  serde_wasm_bindgen::from_value(value)
+    .map_err(|e| JsValue::from_str(&format!("Invalid excluded_aspects: {}", e)))
+}
+
 /// Per-cell "is this azimuth on an excluded aspect" mask, using the same
 /// `contains_azimuth` tolerance as the pathfinder's aspect rule. This is the
 /// single definition of "dangerous aspect" — runout sources and A* blocking
@@ -435,11 +446,7 @@ pub fn compute_runout_for_aspects(
   let height = height as usize;
   let n = width * height;
 
-  let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
-    vec![]
-  } else {
-    serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
-  };
+  let excluded_aspects_vec: Vec<Aspect> = parse_excluded_aspects(excluded_aspects)?;
 
   if excluded_aspects_vec.is_empty() {
     console_log("[WASM] No aspects excluded, returning empty runout");
@@ -515,11 +522,7 @@ fn compute_runout_zones_flat(
 /// each pixel of a GeoTIFF-encoded elevation raster, then derive runout zones.
 #[wasm_bindgen]
 pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) -> Result<AzimuthResult, JsValue> {
-  let excluded_aspects_vec: Vec<Aspect> = if excluded_aspects.is_undefined() || excluded_aspects.is_null() {
-    vec![]
-  } else {
-    serde_wasm_bindgen::from_value(excluded_aspects).unwrap_or(vec![])
-  };
+  let excluded_aspects_vec: Vec<Aspect> = parse_excluded_aspects(excluded_aspects)?;
 
   let cursor = Cursor::new(elevations_geotiff.to_vec());
   let mut reader = GeoTiffReader::open(cursor)
