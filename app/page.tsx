@@ -764,7 +764,7 @@ export default function PathFinderPage() {
       type: "Feature",
       geometry: path,
       properties: {},
-    };
+    } as const;
 
     // Dynamic import to avoid SSR issues (togpx uses window)
     const togpx = (await import("togpx")).default;

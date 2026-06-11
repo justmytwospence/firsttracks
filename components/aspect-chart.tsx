@@ -1,6 +1,6 @@
 import type { Aspect } from "@/components/find-path-button";
 import { aspectStore } from '@/store';
-import { type ActiveElement, ArcElement, type ChartEvent, Chart as ChartJS, Legend, RadialLinearScale, Tooltip } from 'chart.js';
+import { type ActiveElement, ArcElement, type ChartEvent, Chart as ChartJS, Legend, RadialLinearScale, Tooltip, type TooltipItem } from 'chart.js';
 import type { FeatureCollection } from 'geojson';
 import { useState } from 'react';
 import { useMemo } from 'react';
@@ -108,7 +108,7 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
       tooltip: {
         displayColors: false,
         callbacks: {
-          title: (context) => {
+          title: (context: TooltipItem<"polarArea">[]) => {
             const directionNames: Record<string, string> = {
               'N': 'North',
               'NE': 'Northeast',
@@ -122,8 +122,8 @@ export function AspectChart({ aspectPoints, excludedAspects, onAspectClick }: As
             const label = context[0]?.label || '';
             return directionNames[label] || label;
           },
-          label: (context) => {
-            const total = context.chart.data.datasets[0].data.reduce((a: number, b) => a + (b as number), 0);
+          label: (context: TooltipItem<"polarArea">) => {
+            const total = context.chart.data.datasets[0].data.reduce((a: number, b: unknown) => a + (b as number), 0);
             const value = context.raw as number;
             const percentage = ((value / total) * 100).toFixed(1);
             return `${percentage}%`;

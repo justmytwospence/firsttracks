@@ -64,7 +64,7 @@ function getInterpolationParams(
 
 // Bilinear interpolation for smooth sampling between raster pixels
 function bilinearInterpolate(
-  values: number[][],
+  values: ArrayLike<number>[],
   x: number,
   y: number,
   width: number,
@@ -87,8 +87,8 @@ function bilinearInterpolate(
 // Compute aspect intensity with bilinear interpolation of intensities (not azimuths)
 // This avoids artifacts from interpolating circular azimuth values
 function getInterpolatedAspectIntensity(
-  azimuthValues: number[][],
-  gradientValues: number[][],
+  azimuthValues: ArrayLike<number>[],
+  gradientValues: ArrayLike<number>[],
   x: number,
   y: number,
   width: number,
