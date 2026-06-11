@@ -11,6 +11,11 @@ use crate::raster::get_raster_flat;
 /// Sentinel value for "flat" azimuth (no defined slope direction).
 const AZIMUTH_FLAT: f32 = -1.0;
 
+/// Tolerance (degrees) applied when matching an azimuth against an excluded
+/// aspect. Shared by runout source selection and the pathfinder's aspect rule
+/// so both agree on exactly which cells count as dangerous.
+pub const ASPECT_TOLERANCE_DEG: f64 = 22.5;
+
 /// Approximate meters per degree of latitude (good to 0.5% across the globe).
 const METERS_PER_DEG_LAT: f64 = 110540.0;
 /// Meters per degree of longitude at the equator. Multiply by cos(lat) at other latitudes.
@@ -154,46 +159,20 @@ impl Aspect {
     }
   }
 
-  /// 0..=7 for the eight named directions, matching the D8 encoding.
-  fn cardinal_index(&self) -> Option<u8> {
-    match self {
-      Aspect::North => Some(0),
-      Aspect::Northeast => Some(1),
-      Aspect::East => Some(2),
-      Aspect::Southeast => Some(3),
-      Aspect::South => Some(4),
-      Aspect::Southwest => Some(5),
-      Aspect::West => Some(6),
-      Aspect::Northwest => Some(7),
-      Aspect::Flat => None,
-    }
-  }
 }
 
-/// Build a u8 bitmask (one bit per cardinal index) from a list of excluded aspects.
-/// With `with_tolerance` true, each excluded aspect also marks its two neighbours,
-/// matching `contains_azimuth(_, Some(22.5))` semantics used by the pathfinder.
-pub fn excluded_aspect_mask(excluded: &[Aspect], with_tolerance: bool) -> u8 {
-  let mut mask: u8 = 0;
-  for a in excluded {
-    if let Some(i) = a.cardinal_index() {
-      mask |= 1 << i;
-      if with_tolerance {
-        mask |= 1 << ((i + 1) % 8);
-        mask |= 1 << ((i + 7) % 8);
-      }
-    }
-  }
-  mask
-}
-
-/// Convert a 0–360° azimuth to a cardinal index 0..=7. Returns None for flat/NaN.
-fn azimuth_to_aspect_idx(azimuth: f32) -> Option<u8> {
-  if azimuth < 0.0 || azimuth.is_nan() {
-    return None;
-  }
-  let normalized = ((azimuth as f64) + 22.5).rem_euclid(360.0);
-  Some(((normalized / 45.0) as usize % 8) as u8)
+/// Per-cell "is this azimuth on an excluded aspect" mask, using the same
+/// `contains_azimuth` tolerance as the pathfinder's aspect rule. This is the
+/// single definition of "dangerous aspect" — runout sources and A* blocking
+/// must never disagree about which cells qualify.
+fn build_excluded_azimuth_mask(azimuths: &[f32], excluded: &[Aspect]) -> Vec<bool> {
+  azimuths
+    .iter()
+    .map(|&az| {
+      let az = az as f64;
+      excluded.iter().any(|a| a.contains_azimuth(az, Some(ASPECT_TOLERANCE_DEG)))
+    })
+    .collect()
 }
 
 /// Calculate azimuth (degrees, 0..360, or -1 for flat) from horizontal (gx)
@@ -335,26 +314,19 @@ const TERMINATE_BELOW: f32 = 0.05;
 /// Width of the gradient blend zone (10°-20°) where source-zone edge intensity fades in.
 const BLEND_RANGE: f32 = 0.35 - START_ZONE_THRESHOLD;
 
-/// Pre-compute aspect index per cell from a flat azimuth raster.
-fn build_aspect_indices(azimuths: &[f32]) -> Vec<Option<u8>> {
-  azimuths.iter().map(|&a| azimuth_to_aspect_idx(a)).collect()
-}
-
 /// Propagate runout intensity downhill from each excluded-aspect source cell
 /// using D8 flow, then apply lateral spreading. Operates in place on `runout`.
 fn propagate_runout(
   runout: &mut [f32],
   spread_buffer: &mut [f32],
   gradients: &[f32],
-  aspect_indices: &[Option<u8>],
+  is_excluded: &[bool],
   flow_dir: &[u8],
   width: usize,
   height: usize,
-  excluded_mask: u8,
 ) {
   let is_source = |idx: usize| -> bool {
-    gradients[idx] >= START_ZONE_THRESHOLD
-      && aspect_indices[idx].map(|a| (excluded_mask >> a) & 1 == 1).unwrap_or(false)
+    gradients[idx] >= START_ZONE_THRESHOLD && is_excluded[idx]
   };
 
   for i in 1..(height - 1) {
@@ -473,8 +445,7 @@ pub fn compute_runout_for_aspects(
   ));
 
   let flow_dir = compute_d8_flow_directions_flat(elevations_flat, width, height);
-  let aspect_indices = build_aspect_indices(azimuths_flat);
-  let excluded_mask = excluded_aspect_mask(&excluded_aspects_vec, true);
+  let is_excluded = build_excluded_azimuth_mask(azimuths_flat, &excluded_aspects_vec);
 
   let mut runout = vec![0.0f32; n];
   let mut spread_buffer = vec![0.0f32; n];
@@ -482,11 +453,10 @@ pub fn compute_runout_for_aspects(
     &mut runout,
     &mut spread_buffer,
     gradients_flat,
-    &aspect_indices,
+    &is_excluded,
     &flow_dir,
     width,
     height,
-    excluded_mask,
   );
 
   console_log(&format!("[WASM] Lazy runout computation complete, {} elements", runout.len()));
@@ -509,18 +479,16 @@ fn compute_runout_zones_flat(
     return runout;
   }
   let flow_dir = compute_d8_flow_directions_flat(elevations, width, height);
-  let aspect_indices = build_aspect_indices(azimuths);
-  let excluded_mask = excluded_aspect_mask(excluded_aspects, true);
+  let is_excluded = build_excluded_azimuth_mask(azimuths, excluded_aspects);
   let mut spread_buffer = vec![0.0f32; n];
   propagate_runout(
     &mut runout,
     &mut spread_buffer,
     gradients,
-    &aspect_indices,
+    &is_excluded,
     &flow_dir,
     width,
     height,
-    excluded_mask,
   );
   runout
 }
@@ -705,11 +673,12 @@ mod tests {
   }
 
   #[test]
-  fn excluded_aspect_mask_with_tolerance_includes_neighbours() {
-    let mask = excluded_aspect_mask(&[Aspect::North], true);
-    assert_eq!(mask, 0b1000_0011, "North + tolerance should include NE and NW");
-    let mask = excluded_aspect_mask(&[Aspect::North], false);
-    assert_eq!(mask, 0b0000_0001);
+  fn excluded_azimuth_mask_matches_pathfinder_tolerance() {
+    // NE spans 22.5-67.5; with the 22.5 tolerance the excluded range is
+    // exactly [0, 90] — matching contains_azimuth, not whole neighbour bins.
+    let azimuths: Vec<f32> = vec![350.0, 0.0, 45.0, 90.0, 91.0, -1.0];
+    let mask = build_excluded_azimuth_mask(&azimuths, &[Aspect::Northeast]);
+    assert_eq!(mask, vec![false, true, true, true, false, false]);
   }
 
   #[test]

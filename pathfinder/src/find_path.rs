@@ -5,7 +5,7 @@ use js_sys::Function;
 use pathfinding::directed::fringe::fringe;
 use wasm_bindgen::prelude::*;
 
-use crate::azimuth::{deg_pixel_to_meters, Aspect};
+use crate::azimuth::{deg_pixel_to_meters, Aspect, ASPECT_TOLERANCE_DEG};
 
 fn parse_point_to_coordinate(point_str: &str) -> Result<(f64, f64), JsValue> {
   let geojson = GeoJson::from_json_value(
@@ -284,7 +284,7 @@ pub fn find_path_rs(
     }
     let azimuth = azimuths[i] as f64;
     for aspect in &excluded_aspects {
-      if aspect.contains_azimuth(azimuth, Some(22.5)) {
+      if aspect.contains_azimuth(azimuth, Some(ASPECT_TOLERANCE_DEG)) {
         return true;
       }
     }
