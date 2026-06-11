@@ -49,24 +49,6 @@ fn linear_multiplier(x: f64) -> f64 {
   (20.0 * x).clamp(1.0, 20.0)
 }
 
-#[allow(dead_code)]
-fn logistic_multiplier(x: f64) -> f64 {
-  const SCALE: f64 = 5.0;
-  const GROWTH_RATE: f64 = 70.0;
-  const X0: f64 = 0.12;
-  let logistic_curve: f64 = SCALE / (1.0 + (-GROWTH_RATE * (x - X0)).exp());
-  let y_shift: f64 = 1.0 - SCALE / (1.0 + (GROWTH_RATE * X0).exp());
-  logistic_curve + y_shift
-}
-
-#[allow(dead_code)]
-fn exponential_multiplier(x: f64) -> f64 {
-  use std::f64::consts::E;
-  const M: f64 = 50.0;
-  const B: f64 = 0.1;
-  E.powf(M * (x - B)) + 1.0
-}
-
 // RUNOUT_BLOCK (imported from azimuth) splits runout intensity into a
 // graduated cost penalty below it and an outright rejection at or above it.
 // The intensity constants live together in azimuth.rs with the invariants.
@@ -214,7 +196,6 @@ pub fn find_path_rs(
   excluded_aspects: JsValue,
   aspect_gradient_threshold: Option<f64>,
   exploration_callback: Option<Function>,
-  _exploration_batch_size: Option<usize>,
 ) -> Result<String, JsValue> {
   let max_gradient: f64 = max_gradient.unwrap_or(1.0);
   let excluded_aspects: Vec<Aspect> = crate::azimuth::parse_excluded_aspects(excluded_aspects)?;

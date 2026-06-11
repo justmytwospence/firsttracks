@@ -1,12 +1,7 @@
-use georaster::geotiff::GeoTiffReader;
 use js_sys::Float32Array;
 use serde::{Deserialize, Serialize};
-use std::{f64::consts::PI, io::Cursor};
+use std::f64::consts::PI;
 use wasm_bindgen::prelude::*;
-
-use crate::console_log::console_log;
-use crate::geotiff::serialize_to_geotiff_flat;
-use crate::raster::get_raster_flat;
 
 /// Sentinel value for "flat" azimuth (no defined slope direction).
 const AZIMUTH_FLAT: f32 = -1.0;
@@ -44,26 +39,6 @@ const GY_KERNEL: [f64; 25] = [
    4.0,  10.0,  20.0,  10.0,  4.0,
    5.0,   8.0,  10.0,   8.0,  5.0,
 ];
-
-#[wasm_bindgen]
-pub struct AzimuthResult {
-  elevations: Vec<u8>,
-  azimuths: Vec<u8>,
-  gradients: Vec<u8>,
-  runout_zones: Vec<u8>,
-}
-
-#[wasm_bindgen]
-impl AzimuthResult {
-  #[wasm_bindgen(getter)]
-  pub fn elevations(&self) -> Vec<u8> { self.elevations.clone() }
-  #[wasm_bindgen(getter)]
-  pub fn azimuths(&self) -> Vec<u8> { self.azimuths.clone() }
-  #[wasm_bindgen(getter)]
-  pub fn gradients(&self) -> Vec<u8> { self.gradients.clone() }
-  #[wasm_bindgen(getter)]
-  pub fn runout_zones(&self) -> Vec<u8> { self.runout_zones.clone() }
-}
 
 #[wasm_bindgen]
 pub struct AzimuthArrayResult {
@@ -451,7 +426,6 @@ pub fn compute_runout_for_aspects(
   let excluded_aspects_vec: Vec<Aspect> = parse_excluded_aspects(excluded_aspects)?;
 
   if excluded_aspects_vec.is_empty() {
-    console_log("[WASM] No aspects excluded, returning empty runout");
     return Ok(Float32Array::from(vec![0.0f32; n].as_slice()));
   }
 
@@ -461,11 +435,6 @@ pub fn compute_runout_for_aspects(
       n, elevations_flat.len(), azimuths_flat.len(), gradients_flat.len()
     )));
   }
-
-  console_log(&format!(
-    "[WASM] Computing runout for {} excluded aspects on {}x{} grid",
-    excluded_aspects_vec.len(), width, height
-  ));
 
   let flow_dir = compute_d8_flow_directions_flat(elevations_flat, width, height);
   let is_excluded = build_excluded_azimuth_mask(azimuths_flat, &excluded_aspects_vec);
@@ -482,12 +451,11 @@ pub fn compute_runout_for_aspects(
     height,
   );
 
-  console_log(&format!("[WASM] Lazy runout computation complete, {} elements", runout.len()));
   Ok(Float32Array::from(runout.as_slice()))
 }
 
-/// Eager runout computation on flat buffers — used by the GeoTIFF-based
-/// `compute_azimuths` entrypoint.
+/// Eager runout computation on flat buffers (kept for tests).
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn compute_runout_zones_flat(
   elevations: &[f32],
   azimuths: &[f32],
@@ -520,43 +488,6 @@ fn compute_runout_zones_flat(
 // Public WASM entrypoints
 // ---------------------------------------------------------------------------
 
-/// Apply a 5x5 Sobel filter to compute azimuth and gradient along azimuth for
-/// each pixel of a GeoTIFF-encoded elevation raster, then derive runout zones.
-#[wasm_bindgen]
-pub fn compute_azimuths(elevations_geotiff: &[u8], excluded_aspects: JsValue) -> Result<AzimuthResult, JsValue> {
-  let excluded_aspects_vec: Vec<Aspect> = parse_excluded_aspects(excluded_aspects)?;
-
-  let cursor = Cursor::new(elevations_geotiff.to_vec());
-  let mut reader = GeoTiffReader::open(cursor)
-    .map_err(|e| JsValue::from_str(&format!("Failed to open GeoTIFF: {:?}", e)))?;
-  let (elevations, width, height) = get_raster_flat(&mut reader)?;
-
-  let geo_keys = reader.geo_keys.as_ref()
-    .ok_or_else(|| JsValue::from_str("Missing geo_keys"))?
-    .clone();
-  let origin = reader.origin().ok_or_else(|| JsValue::from_str("Missing origin"))?;
-  let pixel_scale_deg = reader.pixel_size().unwrap_or([1.0 / 10800.0, -1.0 / 10800.0]);
-
-  // Convert degrees-per-pixel to meters at the raster centre latitude.
-  let centre_lat = origin[1] + (pixel_scale_deg[1] * height as f64) / 2.0;
-  let (px_x_m, px_y_m) = deg_pixel_to_meters(pixel_scale_deg, centre_lat);
-
-  let (azimuths, gradients) = compute_sobel_flat(&elevations, width, height, px_x_m, px_y_m);
-  let runout_zones = compute_runout_zones_flat(
-    &elevations, &azimuths, &gradients, width, height, &excluded_aspects_vec,
-  );
-
-  // ModelPixelScale is stored positive; georaster will negate the y component on read.
-  let out_pixel_scale = [pixel_scale_deg[0].abs(), pixel_scale_deg[1].abs()];
-
-  Ok(AzimuthResult {
-    elevations: serialize_to_geotiff_flat(&elevations, width, height, &geo_keys, &origin, &out_pixel_scale)?,
-    azimuths: serialize_to_geotiff_flat(&azimuths, width, height, &geo_keys, &origin, &out_pixel_scale)?,
-    gradients: serialize_to_geotiff_flat(&gradients, width, height, &geo_keys, &origin, &out_pixel_scale)?,
-    runout_zones: serialize_to_geotiff_flat(&runout_zones, width, height, &geo_keys, &origin, &out_pixel_scale)?,
-  })
-}
-
 /// Compute azimuths from a raw elevation Float32Array. Used for AWS Terrain
 /// Tiles which are already decoded as flat arrays. Runout is computed lazily.
 ///
@@ -568,14 +499,9 @@ pub fn compute_azimuths_from_array(
   elevations_flat: &[f32],
   width: u32,
   height: u32,
-  _excluded_aspects: JsValue,
   pixel_size_x_m: Option<f64>,
   pixel_size_y_m: Option<f64>,
 ) -> Result<AzimuthArrayResult, JsValue> {
-  console_log(&format!(
-    "[WASM] compute_azimuths_from_array called: {}x{}, {} elements",
-    width, height, elevations_flat.len()
-  ));
   let width = width as usize;
   let height = height as usize;
 

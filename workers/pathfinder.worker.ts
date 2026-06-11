@@ -222,8 +222,7 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
       maxGradient,
       excludedAspects,
       aspectGradientThreshold,
-      explorationCallback,
-      500
+      explorationCallback
     );
 
     self.postMessage({
@@ -269,8 +268,8 @@ async function handleComputeAzimuthsFromArray(request: ComputeAzimuthsFromArrayR
     const pxXMeters = ((bounds.east - bounds.west) / width) * cosLat * 111320;
     const pxYMeters = ((bounds.north - bounds.south) / height) * 110540;
 
-    // Runout is computed lazily on aspect change. Pass an empty array here.
-    const arrayResult = compute_azimuths_from_array(elevations, width, height, [], pxXMeters, pxYMeters);
+    // Runout is computed lazily on aspect change.
+    const arrayResult = compute_azimuths_from_array(elevations, width, height, pxXMeters, pxYMeters);
 
     const resultElevations = arrayResult.get_elevations();
     const resultAzimuths = arrayResult.get_azimuths();
