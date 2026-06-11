@@ -59,9 +59,12 @@ const MAX_TILES = 400;
  */
 export function latLngToTile(lat: number, lng: number, zoom: number): { x: number; y: number } {
   const n = 2 ** zoom;
-  const x = Math.floor((lng + 180) / 360 * n);
-  const latRad = lat * Math.PI / 180;
-  const y = Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n);
+  // Clamp to the Web Mercator domain: lat beyond +/-85.0511 or lng at
+  // exactly 180 would otherwise produce tile indices outside [0, n).
+  const clampedLat = Math.max(-85.05112878, Math.min(85.05112878, lat));
+  const x = Math.max(0, Math.min(n - 1, Math.floor((lng + 180) / 360 * n)));
+  const latRad = clampedLat * Math.PI / 180;
+  const y = Math.max(0, Math.min(n - 1, Math.floor((1 - Math.asinh(Math.tan(latRad)) / Math.PI) / 2 * n)));
   return { x, y };
 }
 
@@ -344,21 +347,42 @@ async function cacheTile(grid: ElevationGrid): Promise<void> {
  */
 async function fetchTerrainTile(x: number, y: number, zoom: number): Promise<Float32Array> {
   const url = `${TERRAIN_TILE_URL}/${zoom}/${x}/${y}.png`;
-  
+
   // AWS terrain tiles return no Cache-Control header (only Last-Modified from 2017).
   // 'force-cache' lets the browser serve any HTTP-cached copy without revalidation;
-  // safe because terrain tiles are immutable.
-  const response = await fetch(url, { cache: 'force-cache' });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch terrain tile ${zoom}/${x}/${y}: ${response.status}`);
+  // safe because terrain tiles are immutable. Transient network/S3 errors are
+  // retried so one hiccup doesn't reject the whole Promise.all of a fetch.
+  const MAX_ATTEMPTS = 3;
+  let response: Response | undefined;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      response = await fetch(url, { cache: 'force-cache' });
+      // 4xx is definitive; only retry server errors.
+      if (response.ok || response.status < 500) break;
+    } catch (error) {
+      if (attempt === MAX_ATTEMPTS) throw error;
+      response = undefined;
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 250 * attempt));
+    }
   }
-  
+  if (!response || !response.ok) {
+    throw new Error(`Failed to fetch terrain tile ${zoom}/${x}/${y}: ${response?.status}`);
+  }
+
   const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
+  // Terrarium decoding needs bit-exact RGB: without these options browsers
+  // (Safari especially) may color-manage the PNG, and 1 LSB of green is a
+  // full meter of elevation error.
+  const bitmap = await createImageBitmap(blob, {
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+  });
   
   // Use OffscreenCanvas to extract pixel data
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) {
     throw new Error('Failed to get 2D context');
   }
@@ -1009,38 +1033,28 @@ export async function getDEMWithContainsCheck(
   }
 ): Promise<ElevationGrid> {
   const { onProgress } = options || {};
-  
+
   const normalizedBounds = normalizeBounds(bounds);
-  const cacheKey = boundsToKey(normalizedBounds);
-  
-  // First check for exact match
+
+  // Look for a cached stitched grid covering the request. (There is no
+  // exact-key fast path: records are keyed by their tile-aligned stitched
+  // bounds, which never match a request's normalized bounds.)
   onProgress?.('Checking DEM cache...');
-  console.log('[DEM Cache] Looking for key:', cacheKey);
-  const exactCached = await getCachedTile(normalizedBounds);
-  
-  if (exactCached) {
-    console.log('[DEM Cache] Exact cache HIT');
-    onProgress?.('Using cached DEM data');
-    return exactCached;
-  }
-  
-  // Check for a larger cached tile that contains our bounds
-  console.log('[DEM Cache] Checking for containing cached tile...');
   const containingCached = await findContainingCachedTile(normalizedBounds);
-  
+
   if (containingCached) {
     console.log('[DEM Cache] Found containing cached tile');
     onProgress?.('Using cached DEM data');
     return containingCached;
   }
-  
+
   console.log('[DEM Cache] Cache MISS - fetching from AWS Terrain Tiles');
   const grid = await fetchDEM(normalizedBounds, onProgress);
-  
+
   onProgress?.('Caching DEM data...');
   await cacheTile(grid);
-  console.log('[DEM Cache] Cached with key:', cacheKey);
-  
+  console.log('[DEM Cache] Cached stitched grid with key:', boundsToKey(grid.bounds));
+
   return grid;
 }
 
