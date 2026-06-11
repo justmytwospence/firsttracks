@@ -418,7 +418,28 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         if (!azimuthData) {
           throw new Error("Azimuth data not available");
         }
-        
+
+        // Runout zones are computed lazily, separate from the azimuth compute.
+        // If the user wants them avoided and the bundle doesn't have them yet,
+        // compute them now — otherwise find_path receives an empty runout
+        // array and the "Avoid Runouts" toggle silently does nothing.
+        if (avoidRunoutZones && excludedAspects.length > 0 && !azimuthData.runout_zones) {
+          toast.message("Computing runout zones...", {
+            id: loadingToastId,
+            duration: Number.POSITIVE_INFINITY,
+          });
+          azimuthData.runout_zones = await pathfinderService.computeRunout(
+            azimuthData.elevations,
+            azimuthData.azimuths,
+            azimuthData.gradients,
+            azimuthData.width,
+            azimuthData.height,
+            azimuthData.bounds,
+            excludedAspects,
+          );
+          toast.dismiss(loadingToastId);
+        }
+
         // Find paths - either all segments or just the last one
         // Only do last segment if:
         // 1. onlyLastSegment prop is true (caller wants incremental)
