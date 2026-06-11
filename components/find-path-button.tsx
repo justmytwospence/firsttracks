@@ -131,7 +131,7 @@ interface FindPathButtonProps {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
   setPath: (path: LineString | null, invocationCounter: number) => void;
-  setPathAspects: (aspectPoints: FeatureCollection) => void;
+  setPathAspects: (aspectPoints: FeatureCollection | null, invocationCounter?: number) => void;
   setAspectRaster: (
     azimuths: Float32Array,
     gradients: Float32Array,
@@ -305,7 +305,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
       // Pass invocationCounter 0 to signal a fresh start
       if (!onlyLastSegment) {
         setPath(null, 0);
-        setPathAspects({ type: "FeatureCollection", features: [] });
+        setPathAspects(null);
       }
       
       setIsLoading(true);
@@ -457,7 +457,8 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
         // Already computed at the top of handleClick as willOnlyDoLastSegment.
         const startSegment = willOnlyDoLastSegment ? waypoints.length - 2 : 0;
         let pathSegmentCounter = willOnlyDoLastSegment ? 1 : 0; // Start at 1 to append
-        
+        let anySegmentFailed = false;
+
         try {
           for (let i = startSegment; i < waypoints.length - 1; i++) {
             const pathPromise = new Promise<string>((resolve, reject) => {
@@ -555,7 +556,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
             } as LineString;
             
             setPath(path, pathSegmentCounter);
-            setPathAspects(pathData as FeatureCollection);
+            setPathAspects(pathData as FeatureCollection, pathSegmentCounter);
             pathSegmentCounter++;
           } catch (segmentError) {
             const errorMessage = segmentError instanceof Error 
@@ -563,6 +564,7 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
               : String(segmentError);
               
             if (errorMessage.toLowerCase().includes("no path found")) {
+              anySegmentFailed = true;
               toast.warning(`No path found for segment ${i + 1}. Try adjusting constraints.`);
             } else {
               throw segmentError;
@@ -574,9 +576,11 @@ const FindPathButton = forwardRef<HTMLButtonElement, FindPathButtonProps>(
           onExplorationComplete?.();
         }
         
-        // Track successful pathfinding waypoint count for incremental optimization
-        lastSuccessfulWaypointCountRef.current = waypoints.length;
-        
+        // Track successful pathfinding waypoint count for incremental optimization.
+        // A failed segment leaves a gap in the path, so the next run must do a
+        // full re-pathfind rather than append onto the incomplete result.
+        lastSuccessfulWaypointCountRef.current = anySegmentFailed ? 0 : waypoints.length;
+
       } catch (error) {
         toast.dismiss(loadingToastId);
         const errorMessage = error instanceof Error ? error.message : String(error);

@@ -644,21 +644,26 @@ export default function PathFinderPage() {
   );
 
   const handleSetPathAspects = useCallback(
-    (newPoints: FeatureCollection | null) => {
+    (newPoints: FeatureCollection | null, invocationCounter = 0) => {
       setPathAspects((currentAspectPoints) => {
         if (newPoints === null) {
           return null;
         }
 
-        const combinedPoints: FeatureCollection = {
+        // Mirror handleSetPath: counter 0 replaces (a fresh pathfind used to
+        // append forever, duplicating aspects); appended segments drop the
+        // shared first point so features stay 1:1 with path coordinates.
+        if (invocationCounter === 0 || !currentAspectPoints) {
+          return newPoints;
+        }
+
+        return {
           type: "FeatureCollection",
           features: [
-            ...(currentAspectPoints?.features || []),
-            ...newPoints.features,
+            ...currentAspectPoints.features,
+            ...newPoints.features.slice(1),
           ],
         };
-
-        return combinedPoints;
       });
     },
     []
@@ -807,6 +812,10 @@ export default function PathFinderPage() {
         ),
       };
       setPath(importedPath);
+      // The imported track is a single segment between the two waypoints
+      // below; stale boundaries from a previous computed path would make
+      // path-clicks insert waypoints at the wrong position.
+      setPathSegmentBoundaries([importedPath.coordinates.length - 1]);
 
       // Add waypoints at start and end so user can continue adding to the path
       const startCoord = lineCoords[0];
