@@ -68,6 +68,124 @@ fn cost_fn(distance_m: f64, gradient: f64, runout_intensity: f32) -> u32 {
   (distance_m * gradient_multiplier * runout_penalty * COST_SCALE).ceil() as u32
 }
 
+/// Plain-Rust inputs for the grid search — no JS types, so the search core is
+/// unit-testable natively (the WASM entrypoint wraps this).
+struct GridSearch<'a> {
+  elevations: &'a [f32],
+  azimuths: &'a [f32],
+  gradients: &'a [f32],
+  runout_zones: &'a [f32],
+  width: usize,
+  height: usize,
+  px_x_m: f64,
+  px_y_m: f64,
+  max_gradient: f64,
+  excluded_aspects: &'a [Aspect],
+  aspect_gradient_threshold: f64,
+}
+
+#[derive(Debug, PartialEq)]
+enum SearchOutcome {
+  Path(Vec<(usize, usize)>),
+  NoPath,
+  StartBlocked,
+  EndBlocked,
+}
+
+const DIRECTIONS: [(isize, isize); 8] = [
+  (0, 1), (1, 0), (0, -1), (-1, 0),
+  (1, 1), (1, -1), (-1, -1), (-1, 1),
+];
+
+impl GridSearch<'_> {
+  fn idx(&self, x: usize, y: usize) -> usize {
+    y * self.width + x
+  }
+
+  fn is_blocked(&self, i: usize) -> bool {
+    if !self.runout_zones.is_empty() && self.runout_zones[i] >= RUNOUT_BLOCK {
+      return true;
+    }
+    if (self.gradients[i] as f64) <= self.aspect_gradient_threshold {
+      return false;
+    }
+    let azimuth = self.azimuths[i] as f64;
+    self
+      .excluded_aspects
+      .iter()
+      .any(|a| a.contains_azimuth(azimuth, Some(ASPECT_TOLERANCE_DEG)))
+  }
+
+  fn run(
+    &self,
+    start_node: (usize, usize),
+    end_node: (usize, usize),
+    tracker: &Rc<RefCell<ExplorationTracker>>,
+  ) -> SearchOutcome {
+    if self.is_blocked(self.idx(start_node.0, start_node.1)) {
+      return SearchOutcome::StartBlocked;
+    }
+    if self.is_blocked(self.idx(end_node.0, end_node.1)) {
+      return SearchOutcome::EndBlocked;
+    }
+
+    let heuristic = |&(x, y): &(usize, usize)| -> u32 {
+      // Floor (default truncation) keeps the heuristic admissible against
+      // ceil'd edge costs at the same fixed-point scale.
+      (octile_distance((x, y), end_node, self.px_x_m, self.px_y_m) * COST_SCALE) as u32
+    };
+
+    let successors = |&(x, y): &(usize, usize)| -> Vec<((usize, usize), u32)> {
+      tracker.borrow_mut().add_node(x, y);
+
+      let mut neighbours: Vec<((usize, usize), u32)> = Vec::with_capacity(8);
+      let cur_elev = self.elevations[self.idx(x, y)];
+
+      for &(dx, dy) in DIRECTIONS.iter() {
+        let nx_i = x as isize + dx;
+        let ny_i = y as isize + dy;
+        if nx_i < 0 || ny_i < 0 {
+          continue;
+        }
+        let nx = nx_i as usize;
+        let ny = ny_i as usize;
+        if nx >= self.width || ny >= self.height {
+          continue;
+        }
+        let n_idx = self.idx(nx, ny);
+
+        if self.is_blocked(n_idx) {
+          continue;
+        }
+
+        // No corner-cutting: a diagonal step is rejected if both adjoining
+        // cardinal cells are blocked, since the path "sweeps" through them.
+        if dx != 0 && dy != 0 && self.is_blocked(self.idx(nx, y)) && self.is_blocked(self.idx(x, ny)) {
+          continue;
+        }
+
+        let d = euclidean_distance((x, y), (nx, ny), self.px_x_m, self.px_y_m);
+        let dz = (self.elevations[n_idx] - cur_elev) as f64;
+        let gradient = dz / d;
+        // NaN elevations (nodata) would sail through the comparison below
+        // (NaN >= x is false) and poison the cost; treat them as impassable.
+        if !gradient.is_finite() || gradient >= self.max_gradient {
+          continue;
+        }
+
+        let runout_intensity = if self.runout_zones.is_empty() { 0.0 } else { self.runout_zones[n_idx] };
+        neighbours.push(((nx, ny), cost_fn(d, gradient, runout_intensity)));
+      }
+      neighbours
+    };
+
+    match fringe(&start_node, successors, heuristic, |&n: &(usize, usize)| n == end_node) {
+      Some((path, _)) => SearchOutcome::Path(path),
+      None => SearchOutcome::NoPath,
+    }
+  }
+}
+
 /// Exploration tracker — streams newly-explored cells to JS for the animated flood-fill overlay.
 ///
 /// Origin / scale / dimensions are sent once at start via `send_init`, so each flush only
@@ -89,13 +207,18 @@ const TIME_CHECK_NODE_STRIDE: u32 = 200;
 
 impl ExplorationTracker {
   fn new(callback: Option<Function>, width: usize, height: usize) -> Self {
-    let words = if callback.is_some() { (width * height).div_ceil(64) } else { 0 };
+    let has_cb = callback.is_some();
+    let words = if has_cb { (width * height).div_ceil(64) } else { 0 };
+    // js_sys::Date::now() is unavailable off the wasm target; only the
+    // callback path consults the clock, so skip it when there's no callback
+    // (this also lets the search run in native unit tests).
+    let last_flush_time_ms = if has_cb { js_sys::Date::now() } else { 0.0 };
     Self {
       callback,
       pending_cells: Vec::with_capacity(16_384),
       explored_bits: vec![0u64; words],
       width,
-      last_flush_time_ms: js_sys::Date::now(),
+      last_flush_time_ms,
       nodes_since_time_check: 0,
     }
   }
@@ -277,123 +400,41 @@ pub fn find_path_rs(
     width,
     height,
   );
-  let tracker_clone = tracker.clone();
-
-  let idx = |x: usize, y: usize| -> usize { y * width_us + x };
-
-  let is_blocked_by_aspect = |i: usize| -> bool {
-    let g = gradients[i] as f64;
-    if g <= aspect_gradient_threshold {
-      return false;
-    }
-    let azimuth = azimuths[i] as f64;
-    for aspect in &excluded_aspects {
-      if aspect.contains_azimuth(azimuth, Some(ASPECT_TOLERANCE_DEG)) {
-        return true;
-      }
-    }
-    false
+  let search = GridSearch {
+    elevations,
+    azimuths,
+    gradients,
+    runout_zones,
+    width: width_us,
+    height: height_us,
+    px_x_m,
+    px_y_m,
+    max_gradient,
+    excluded_aspects: &excluded_aspects,
+    aspect_gradient_threshold,
   };
 
-  let is_blocked = |i: usize| -> bool {
-    if has_runout && runout_zones[i] >= RUNOUT_BLOCK {
-      return true;
-    }
-    is_blocked_by_aspect(i)
-  };
-
-  // Fail fast with a specific message if an endpoint is itself blocked —
-  // otherwise the search exhausts the whole reachable raster before
-  // reporting a generic "No path found".
-  if is_blocked(idx(start_node.0, start_node.1)) {
-    return Err(JsValue::from_str(
-      "Start point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
-    ));
-  }
-  if is_blocked(idx(end_node.0, end_node.1)) {
-    return Err(JsValue::from_str(
-      "End point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
-    ));
-  }
-
-  const DIRECTIONS: [(isize, isize); 8] = [
-    (0, 1), (1, 0), (0, -1), (-1, 0),
-    (1, 1), (1, -1), (-1, -1), (-1, 1),
-  ];
-
-  let heuristic = |&(x, y): &(usize, usize)| -> u32 {
-    // Floor (default truncation) keeps the heuristic admissible against
-    // ceil'd edge costs at the same fixed-point scale.
-    (octile_distance((x, y), end_node, px_x_m, px_y_m) * COST_SCALE) as u32
-  };
-
-  let successors = |&(x, y): &(usize, usize)| -> Vec<((usize, usize), u32)> {
-    tracker_clone.borrow_mut().add_node(x, y);
-
-    let mut neighbours: Vec<((usize, usize), u32)> = Vec::with_capacity(8);
-    let cur_idx = idx(x, y);
-    let cur_elev = elevations[cur_idx];
-
-    for &(dx, dy) in DIRECTIONS.iter() {
-      let nx_i = x as isize + dx;
-      let ny_i = y as isize + dy;
-      if nx_i < 0 || ny_i < 0 {
-        continue;
-      }
-      let nx = nx_i as usize;
-      let ny = ny_i as usize;
-      if nx >= width_us || ny >= height_us {
-        continue;
-      }
-      let n_idx = idx(nx, ny);
-
-      if is_blocked(n_idx) {
-        continue;
-      }
-
-      // No corner-cutting: a diagonal step is rejected if both adjoining
-      // cardinal cells are blocked, since the path "sweeps" through them.
-      if dx != 0 && dy != 0 {
-        let cardinal_x_idx = idx(nx, y);
-        let cardinal_y_idx = idx(x, ny);
-        if is_blocked(cardinal_x_idx) && is_blocked(cardinal_y_idx) {
-          continue;
-        }
-      }
-
-      let d = euclidean_distance((x, y), (nx, ny), px_x_m, px_y_m);
-      let dz = (elevations[n_idx] - cur_elev) as f64;
-      let gradient = dz / d;
-      // NaN elevations (nodata) would sail through the comparison below
-      // (NaN >= x is false) and poison the cost; treat them as impassable.
-      if !gradient.is_finite() || gradient >= max_gradient {
-        continue;
-      }
-
-      let runout_intensity = if has_runout { runout_zones[n_idx] } else { 0.0 };
-      let cost = cost_fn(d, gradient, runout_intensity);
-      neighbours.push(((nx, ny), cost));
-    }
-    neighbours
-  };
-
-  let is_end_node = |&node: &(usize, usize)| -> bool { node == end_node };
-
-  let result: Option<(Vec<(usize, usize)>, u32)> =
-    fringe(&start_node, successors, heuristic, is_end_node);
-
+  let outcome = search.run(start_node, end_node, &tracker);
   tracker.borrow_mut().flush();
 
-  let path_nodes: Vec<(usize, usize)> = match result {
-    Some((path, _)) => path,
-    None => return Err(JsValue::from_str("No path found")),
+  let path_nodes: Vec<(usize, usize)> = match outcome {
+    SearchOutcome::Path(path) => path,
+    SearchOutcome::NoPath => return Err(JsValue::from_str("No path found")),
+    // Fail fast with a specific message when an endpoint is itself blocked —
+    // otherwise the search exhausts the whole reachable raster first.
+    SearchOutcome::StartBlocked => return Err(JsValue::from_str(
+      "Start point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
+    )),
+    SearchOutcome::EndBlocked => return Err(JsValue::from_str(
+      "End point is on excluded terrain (aspect or runout). Move the waypoint or relax constraints.",
+    )),
   };
 
   let features: Vec<geojson::Feature> = path_nodes
     .iter()
     .map(|(x, y)| {
       let (lon, lat) = pixel_to_coord(*x as u32, *y as u32);
-      let i = idx(*x, *y);
+      let i = y * width_us + x;
       let elevation = elevations[i] as f64;
       let azimuth = azimuths[i] as f64;
       let aspect = Aspect::from_azimuth(azimuth);
@@ -471,5 +512,141 @@ mod tests {
     let (lon, lat) = parse_point_to_coordinate(s).expect("should parse");
     assert!((lon - (-122.4)).abs() < 1e-9, "lon wrong: {}", lon);
     assert!((lat - 37.8).abs() < 1e-9, "lat wrong: {}", lat);
+  }
+
+  // ----- GridSearch integration tests -----
+
+  fn no_tracker() -> Rc<RefCell<ExplorationTracker>> {
+    Rc::new(RefCell::new(ExplorationTracker::new(None, 0, 0)))
+  }
+
+  // is_blocked indexes the azimuth/gradient bands per cell, so they must be
+  // full-length (as the real entrypoint guarantees), never empty slices.
+  fn search_with_bands<'a>(
+    elevations: &'a [f32],
+    azimuths: &'a [f32],
+    gradients: &'a [f32],
+    runout: &'a [f32],
+    width: usize,
+    height: usize,
+    excluded: &'a [Aspect],
+  ) -> GridSearch<'a> {
+    GridSearch {
+      elevations,
+      azimuths,
+      gradients,
+      runout_zones: runout,
+      width,
+      height,
+      px_x_m: 10.0,
+      px_y_m: 10.0,
+      max_gradient: 1.0,
+      excluded_aspects: excluded,
+      aspect_gradient_threshold: 0.0,
+    }
+  }
+
+  #[test]
+  fn search_finds_straight_path_on_flat_grid() {
+    let (w, h) = (5, 5);
+    let elev = vec![0.0f32; w * h];
+    let azimuths = vec![-1.0f32; w * h];
+    let gradients = vec![0.0f32; w * h];
+    let runout = vec![0.0f32; w * h];
+    let search = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    match search.run((0, 0), (4, 0), &no_tracker()) {
+      SearchOutcome::Path(p) => {
+        assert_eq!(p.first(), Some(&(0, 0)));
+        assert_eq!(p.last(), Some(&(4, 0)));
+        // Cardinal run along a row: exactly the 5 cells, no detour.
+        assert_eq!(p.len(), 5);
+      }
+      other => panic!("expected a path, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn search_routes_around_a_runout_wall() {
+    // A vertical wall of blocking runout at x=2 spanning rows 0..4, with a gap
+    // at the bottom row. The path must detour through the gap.
+    let (w, h) = (5, 5);
+    let elev = vec![0.0f32; w * h];
+    let azimuths = vec![-1.0f32; w * h];
+    let gradients = vec![0.0f32; w * h];
+    let mut runout = vec![0.0f32; w * h];
+    for y in 0..4 {
+      runout[y * w + 2] = 1.0; // blocked column, gap left open at y=4
+    }
+    let search = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    match search.run((0, 0), (4, 0), &no_tracker()) {
+      SearchOutcome::Path(p) => {
+        assert_eq!(p.first(), Some(&(0, 0)));
+        assert_eq!(p.last(), Some(&(4, 0)));
+        // No cell on the path may be a blocked runout cell.
+        for &(x, y) in &p {
+          assert!(runout[y * w + x] < RUNOUT_BLOCK, "path crossed blocked cell {:?}", (x, y));
+        }
+        // Must reach the gap row to get around the wall.
+        assert!(p.iter().any(|&(_, y)| y == 4), "path didn't use the gap");
+      }
+      other => panic!("expected a detour path, got {:?}", other),
+    }
+  }
+
+  #[test]
+  fn search_reports_no_path_when_walled_off() {
+    // Full blocking column splits the grid; no gap.
+    let (w, h) = (5, 5);
+    let elev = vec![0.0f32; w * h];
+    let azimuths = vec![-1.0f32; w * h];
+    let gradients = vec![0.0f32; w * h];
+    let mut runout = vec![0.0f32; w * h];
+    for y in 0..h {
+      runout[y * w + 2] = 1.0;
+    }
+    let search = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    assert_eq!(search.run((0, 0), (4, 0), &no_tracker()), SearchOutcome::NoPath);
+  }
+
+  #[test]
+  fn search_detects_blocked_endpoints() {
+    let (w, h) = (5, 5);
+    let elev = vec![0.0f32; w * h];
+    let azimuths = vec![-1.0f32; w * h];
+    let gradients = vec![0.0f32; w * h];
+    let mut runout = vec![0.0f32; w * h];
+    runout[0] = 1.0; // start (0,0)
+    let search = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    assert_eq!(search.run((0, 0), (4, 0), &no_tracker()), SearchOutcome::StartBlocked);
+
+    let mut runout2 = vec![0.0f32; w * h];
+    runout2[4] = 1.0; // end (4,0)
+    let search2 = search_with_bands(&elev, &azimuths, &gradients, &runout2, w, h, &[]);
+    assert_eq!(search2.run((0, 0), (4, 0), &no_tracker()), SearchOutcome::EndBlocked);
+  }
+
+  #[test]
+  fn search_blocks_steep_ascent_but_allows_descent() {
+    // Column x=2 is a tall wall: climbing into it exceeds max_gradient, so a
+    // left-to-right path can't cross it and there's no way around → NoPath.
+    // The same wall descended (right-to-left) is allowed.
+    let (w, h) = (5, 3);
+    let mut elev = vec![0.0f32; w * h];
+    for y in 0..h {
+      elev[y * w + 2] = 1000.0; // 100 m/px climb >> max_gradient 1.0
+      elev[y * w + 3] = 1000.0;
+      elev[y * w + 4] = 1000.0;
+    }
+    let azimuths = vec![-1.0f32; w * h];
+    let gradients = vec![0.0f32; w * h];
+    let runout = vec![0.0f32; w * h];
+
+    let up = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    assert_eq!(up.run((0, 1), (4, 1), &no_tracker()), SearchOutcome::NoPath,
+      "steep ascent into the wall should be impassable");
+
+    let down = search_with_bands(&elev, &azimuths, &gradients, &runout, w, h, &[]);
+    assert!(matches!(down.run((4, 1), (0, 1), &no_tracker()), SearchOutcome::Path(_)),
+      "descending the same wall should be allowed");
   }
 }
