@@ -10,6 +10,7 @@
  */
 
 import wasmInit, { find_path_rs, compute_azimuths_from_array, compute_runout_for_aspects, init as initPanicHook } from '../pathfinder/pkg/pathfinder';
+import { createExplorationReassembler, pixelScaleFromBounds } from '../lib/worker-protocol';
 
 // Worker-scope `self`. The project's tsconfig includes `dom` (not `webworker`),
 // so `self` would otherwise type as `Window`, which has the wrong postMessage shape.
@@ -76,19 +77,6 @@ export interface ComputeRunoutResult {
   runout_zones: Float32Array;
 }
 
-/**
- * Raw exploration data from Rust WASM.
- */
-export interface RawExplorationData {
-  cells: Uint16Array;
-  originX: number;
-  originY: number;
-  scaleX: number;
-  scaleY: number;
-  width: number;
-  height: number;
-}
-
 export interface ExplorationUpdate {
   type: 'exploration';
   id: string;
@@ -150,12 +138,6 @@ async function ensureWasmInit(): Promise<void> {
   }
 }
 
-function pixelScaleFromBounds(bounds: BoundsLike, width: number, height: number) {
-  const pixelScaleX = (bounds.east - bounds.west) / width;
-  // pixelScaleY is negative — latitude decreases as raster y increases.
-  const pixelScaleY = (bounds.south - bounds.north) / height;
-  return { pixelScaleX, pixelScaleY };
-}
 
 async function handleFindPath(request: PathfinderRequest): Promise<void> {
   const { id, elevations, azimuths, gradients, runoutZones, width, height, bounds, start, end, maxGradient, excludedAspects, aspectGradientThreshold } = request;
@@ -172,34 +154,12 @@ async function handleFindPath(request: PathfinderRequest): Promise<void> {
     const endGeoJson = JSON.stringify({ type: 'Point', coordinates: end });
 
     // Two-phase callback: Rust sends "init" once with origin/scale/dims,
-    // then "cells" messages per batch. Cache the constants and forward in
-    // the original ExplorationUpdate shape so the leaflet overlay is unchanged.
-    let cached: Omit<RawExplorationData, 'cells'> | null = null;
-    const explorationCallback = (data: { type?: string; cells?: Uint16Array } & Partial<RawExplorationData>) => {
-      if (data.type === 'init') {
-        cached = {
-          originX: data.originX as number,
-          originY: data.originY as number,
-          scaleX: data.scaleX as number,
-          scaleY: data.scaleY as number,
-          width: data.width as number,
-          height: data.height as number,
-        };
-        return;
-      }
-      if (!cached || !data.cells) return;
-      self.postMessage({
-        type: 'exploration',
-        id,
-        cells: data.cells,
-        originX: cached.originX,
-        originY: cached.originY,
-        scaleX: cached.scaleX,
-        scaleY: cached.scaleY,
-        width: cached.width,
-        height: cached.height,
-      } satisfies ExplorationUpdate);
-    };
+    // then "cells" messages per batch. The reassembler caches the constants
+    // and merges them into each batch; forward in the ExplorationUpdate shape
+    // so the leaflet overlay is unchanged.
+    const explorationCallback = createExplorationReassembler((batch) => {
+      self.postMessage({ type: 'exploration', id, ...batch } satisfies ExplorationUpdate);
+    });
 
     const { pixelScaleX, pixelScaleY } = pixelScaleFromBounds(bounds, width, height);
     // Origin is the NW corner.
